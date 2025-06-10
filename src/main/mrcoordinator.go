@@ -9,10 +9,13 @@ package main
 // Please do not change this file.
 //
 
-import "6.5840/mr"
-import "time"
-import "os"
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"time"
+
+	"6.5840/mr"
+)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -20,7 +23,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// os.Args[1:] = [/home/verzil/coding/project/6.5840/src/main/pg-*.txt]
 	m := mr.MakeCoordinator(os.Args[1:], 10)
+	// fmt.Println(os.Args[1:])
 	for m.Done() == false {
 		time.Sleep(time.Second)
 	}

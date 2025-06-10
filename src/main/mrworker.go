@@ -5,16 +5,19 @@ package main
 // in ../mr/worker.go. typically there will be
 // multiple worker processes, talking to one coordinator.
 //
-// go run mrworker.go wc.so
+// go run mrworker.go wc.so -> **go build -buildmode=plugin -gcflags="all=-N -l" ../mrapps/wc.go**
 //
 // Please do not change this file.
 //
 
-import "6.5840/mr"
-import "plugin"
-import "os"
-import "fmt"
-import "log"
+import (
+	"fmt"
+	"log"
+	"os"
+	"plugin"
+
+	"6.5840/mr"
+)
 
 func main() {
 	if len(os.Args) != 2 {
@@ -23,7 +26,7 @@ func main() {
 	}
 
 	mapf, reducef := loadPlugin(os.Args[1])
-
+	fmt.Println(os.Args[1])
 	mr.Worker(mapf, reducef)
 }
 
@@ -45,5 +48,6 @@ func loadPlugin(filename string) (func(string, string) []mr.KeyValue, func(strin
 	}
 	reducef := xreducef.(func(string, []string) string)
 
+	fmt.Println("success")
 	return mapf, reducef
 }
