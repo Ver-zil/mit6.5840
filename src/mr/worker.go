@@ -18,6 +18,14 @@ type KeyValue struct {
 	Value string
 }
 
+// for sorting by key.
+type SortByKey []KeyValue
+
+// for sorting by key.
+func (a SortByKey) Len() int           { return len(a) }
+func (a SortByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a SortByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
 func ihash(key string) int {
@@ -32,6 +40,14 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// mapf函数会帮忙将文档里的key提取出来，但是需要你单独处理合并逻辑
 	// mapf("ignore this","word1 word2 word1")-> {"word1":1,"word2":1,"word1":1}
+
+	// 第二次修改需要完全配合mapf和reducef两个文件的逻辑
+	// 1st version完全按照我自己的逻辑进行处理
+	// 结果就是进行test的时候会出现不少问题，因为每个文件里的mapf和reducef的逻辑是不一样的
+	// mr任务的核心是任务调配而不是mr本身的逻辑处理
+	// 任务难点：
+	// 1.mapf生成的东西以什么形式进行保存才方便reducef进行最终阶段的处理
+	// 2.reducef逻辑上是一个文件一个文件读出来再整合还是全部读出来再进行整合
 
 	// Your worker implementation here.
 	// 和coordinator进行第一次通讯，询问编号
@@ -110,27 +126,23 @@ func mergeAndSave(keyValueList []KeyValue, reply ResponseReply) []string {
 	nReduce := reply.NReduce
 	taskNumber := reply.Task.TaskNumber
 	savePathList := make([]string, nReduce)
-	mapList := make([]map[string]int, nReduce)
-	for i := range mapList {
-		mapList[i] = make(map[string]int)
+
+	intermediate := make([][]KeyValue, nReduce)
+
+	for i := range intermediate {
+		intermediate[i] = make([]KeyValue, 0)
 	}
 
 	for _, kv := range keyValueList {
 		idx := ihash(kv.Key) % nReduce
-		mapList[idx][kv.Key] = mapList[idx][kv.Key] + 1
+		intermediate[idx] = append(intermediate[idx], kv)
 	}
 
 	// 将文件sava起来，文件名mr-taskNumber-nReduceBlock
 	for i := 0; i < nReduce; i++ {
 		// todo这里其实有个小问题，如果mrworker和mrcoordinator不在一个dir下，那么路径解析就会出问题
 		// todo提交任务的时候应该将相对路径转化成绝对路径
-		filename := fmt.Sprintf("/mr-%d-%d.json", taskNumber, i)
-
-		jsondata, err := json.Marshal(mapList[i])
-
-		if err != nil {
-			log.Fatalf("jsondata出现问题：wokerid：%d，idx：%d", reply.Workerid, i)
-		}
+		filename := fmt.Sprintf("/mr-%d-%d", taskNumber, i)
 
 		dirPath := "./mrtmp"
 		if err := os.MkdirAll(dirPath, 0755); err != nil {
@@ -142,9 +154,12 @@ func mergeAndSave(keyValueList []KeyValue, reply ResponseReply) []string {
 		}
 		defer file.Close()
 
-		_, err = file.Write(jsondata)
-		if err != nil {
-			log.Fatalf("文件写入出错 wokerid：%d，idx：%d", reply.Workerid, i)
+		enc := json.NewEncoder(file)
+		for _, kv := range intermediate[i] {
+			err := enc.Encode(&kv)
+			if err != nil {
+				log.Printf("kv数据刷入出现了问题 workerid:%v, taskNumber:%v, kv:%v\n", reply.Workerid, taskNumber, kv)
+			}
 		}
 
 		// 这一步保证了提交给coordinator的任务，是按照hash顺序进行提交的
@@ -155,45 +170,53 @@ func mergeAndSave(keyValueList []KeyValue, reply ResponseReply) []string {
 }
 
 func doReduceTask(reply ResponseReply, reducef func(string, []string) string) {
-	// 本reduce任务中，可能不太需要reducef，因为返回的都是些没用的东西
-	// 根据reply中的路径，将读取的map全都汇总
-	sum := map[string]int{}
+	// 对map和reduce逻辑进行修正，完全通过reducef进行
+	// 根据reply中的路径，将所有数据读入一个数组中，再进行合并逻辑(偷来的代码是这么写的)
+	sum := make([]KeyValue, 0)
 
 	for _, filePath := range reply.Task.FilePath {
-		data, err := os.ReadFile(filePath)
+		file, err := os.Open(filePath)
 		if err != nil {
-			fmt.Println("Error reading file:", err)
-			return
+			log.Fatalf("Error opening file: %v", err)
 		}
+		defer file.Close() // 确保最终关闭文件
 
 		// 解析 JSON 数据
-		var result map[string]interface{}
-		err = json.Unmarshal(data, &result)
-		if err != nil {
-			fmt.Println("Error unmarshaling JSON:", err)
-			return
-		}
-
-		for key, value := range result {
-			sum[key] = sum[key] + int(value.(float64))
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			sum = append(sum, kv)
 		}
 	}
 
-	// 对sum的结果进行字典序排序，然后进行存储
-	keys := []string{}
-	for k := range sum {
-		keys = append(keys, k)
-	}
-
-	sort.Strings(keys)
+	// 对sum结果进行简单的整理排序
+	sort.Sort(SortByKey(sum))
 
 	filename := fmt.Sprintf("mr-out-%d", reply.Task.TaskNumber)
 	ofile, _ := os.Create(filename)
-	defer ofile.Close()
 
-	for idx := range keys {
-		fmt.Fprintf(ofile, "%v %v\n", keys[idx], sum[keys[idx]])
+	i := 0
+	for i < len(sum) {
+		j := i + 1
+		for j < len(sum) && sum[j].Key == sum[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, sum[k].Value)
+		}
+		output := reducef(sum[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", sum[i].Key, output)
+
+		i = j
 	}
+
+	ofile.Close()
 
 	// 将最终结果进行提交
 	submitTask := TaskSubmissionArgs{Workerid: reply.Workerid, Task: Task{reply.Task.TaskType, []string{filename}, reply.Task.TaskNumber}}
