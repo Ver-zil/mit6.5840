@@ -7,6 +7,7 @@ import (
 	"6.5840/labrpc"
 )
 
+// end应该就是端的意思，表示端名，end.end里封装了call方法
 type end struct {
 	name string
 	end  *labrpc.ClientEnd
@@ -18,11 +19,11 @@ type end struct {
 type Clnt struct {
 	mu   sync.Mutex
 	net  *labrpc.Network
-	ends map[string]end
+	ends map[string]end // srvs->end 根据server name进行通讯
 
 	// if nil client can connect to all servers
 	// if len(srvs) = 0, client cannot connect to any servers
-	srvs []string
+	srvs []string // 应该是表示能够进行通讯的server
 }
 
 func makeClntTo(net *labrpc.Network, srvs []string) *Clnt {

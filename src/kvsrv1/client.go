@@ -1,17 +1,19 @@
 package kvsrv
 
 import (
+	"log"
+
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/tester1"
 )
 
-
 type Clerk struct {
-	clnt   *tester.Clnt
+	clnt   *tester.Clnt // 其中定义好了rpc通讯的方法call
 	server string
 }
 
+// kvtest.IKVClerk有get和put方法的通用接口
 func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 	ck := &Clerk{clnt: clnt, server: server}
 	// You may add code here.
@@ -30,7 +32,19 @@ func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
-	return "", 0, rpc.ErrNoKey
+	args := rpc.GetArgs{Key: key}
+	reply := rpc.GetReply{}
+	for !ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply) {
+
+		// 按照描述除了ErrNoKey的其他错误，都需要不停尝试
+		if reply.Err == rpc.ErrNoKey {
+			return "", 0, rpc.ErrNoKey
+		} else if reply.Err == rpc.OK {
+			break
+		}
+	}
+
+	return reply.Value, reply.Version, reply.Err
 }
 
 // Put updates key with value only if the version in the
@@ -52,5 +66,12 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return rpc.ErrNoKey
+	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	reply := rpc.PutReply{}
+
+	for !ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply) {
+		log.Printf("client put connect err\n")
+	}
+
+	return reply.Err
 }
