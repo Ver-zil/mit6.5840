@@ -54,7 +54,7 @@ func (lk *Lock) Acquire() {
 			err = lk.ck.Put(lk.lockKey, lk.id, version)
 
 			if err == rpc.OK {
-				log.Printf("")
+				log.Printf("抢锁成功，lock id:e%v \n", lk.id)
 				return
 			}
 
@@ -74,10 +74,37 @@ func (lk *Lock) Release() {
 	// Your code here
 	// 首先先获取当前锁的状态，如果是自己的，则修改锁状态成为""，如果不是则pass
 
-	value, version, err := lk.ck.Get(lk.lockKey)
+	/*
+		加入rpc.ErrMaybe以后需要对这块逻辑进行一定的修正
+		因为存在丢包问题，所以put操作会返回各种err
+		rpc.OK 理想返回值，锁被释放
+		rpc.ErrNoKey 一般不会存在这种错误，除非一开始连加锁都没进行就解锁
+		rpc.ErrVersion 一般不会有这种错误，除非其他的lock和当前lock生成了同一个标识
+		rpc.ErrMaybe 因为丢包问题的存在，所以不知道具体情况，在不考虑其他lock未成功上锁就尝试进行release的情况，返回这个值其实就是释放成功了
+					 我们的场景比较简单，不存在lease和节点crash的情景，所以一个抢到锁的节点去释放锁，因为重试机制，最后不管重试多少次一定会释放成功的
+	*/
+	for {
+		value, version, err := lk.ck.Get(lk.lockKey)
 
-	if err == rpc.OK && value == lk.id {
-		for lk.ck.Put(lk.lockKey, "", version) != rpc.OK {
+		if err == rpc.ErrNoKey || err == rpc.OK && value != lk.id {
+			// 这种情况一般不会发生
+			log.Printf("请不要释放不属于自己的锁 lock id:%v \n", lk.id)
+			return
+		} else if err == rpc.OK && value == lk.id {
+			// todo:下面这一段其实逻辑可以简化一些，因为有些情况不太可能发生，就算发生也会后续重试解决
+			// 开始释放锁
+			if err = lk.ck.Put(lk.lockKey, "", version); err == rpc.OK {
+				log.Printf("锁被释放 lock id:%v \n", lk.id)
+				return
+			} else if err == rpc.ErrMaybe {
+				log.Printf("理论上锁已经被释放了，但是情况未知，继续重试\n")
+			} else if err == rpc.ErrVersion {
+				log.Printf("版本号不匹配，请重试\n")
+			} else if err == rpc.ErrNoKey {
+				log.Printf("key不存在\n")
+				return
+			}
+
 		}
 	}
 
