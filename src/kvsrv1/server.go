@@ -43,7 +43,7 @@ func MakeKVServer() *KVServer {
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// Your code here.
 	// 读操作没必要上锁，因为没有删除操作
-	// todo:判断key存在与否和*val这个事情不是原子的，如果有删除操作就需要上锁了
+	// todo:判断key存在与否和*val这个事情不是原子的，如果有remove操作就需要上锁了
 	if val, ok := kv.data[args.Key]; ok {
 		// 避免高并发环境下value和version最后读到了不同版本的值，采用变量副本来赋值
 		realVal := *val
@@ -61,6 +61,7 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 // args.Version is 0, and returns ErrNoKey otherwise.
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// Your code here.
+	// todo:锁的粒度比较粗，高并发环境下可以考虑根据key进行加锁
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
