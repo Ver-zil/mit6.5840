@@ -15,10 +15,10 @@ import (
 )
 
 type Test struct {
-	*tester.Config
-	t *testing.T
-	n int
-	g *tester.ServerGrp
+	*tester.Config                   // 继承字段
+	t              *testing.T        // 外面传进来的test
+	n              int               // server的数量
+	g              *tester.ServerGrp //
 
 	finished int32
 
@@ -61,6 +61,9 @@ func (ts *Test) restart(i int) {
 	ts.Group(tester.GRP0).ConnectAll()
 }
 
+// 测试election，10轮内(每一轮都会睡一会)，必须保证 有且只有 一个leader存在
+//
+// return leaderIdx
 func (ts *Test) checkOneLeader() int {
 	tester.AnnotateCheckerBegin("checking for a single leader")
 	for iters := 0; iters < 10; iters++ {
@@ -101,6 +104,9 @@ func (ts *Test) checkOneLeader() int {
 	return -1
 }
 
+// 要求当前所有节点的term一致，否则lab失败
+//
+// return term
 func (ts *Test) checkTerms() int {
 	tester.AnnotateCheckerBegin("checking term agreement")
 	term := -1
@@ -122,6 +128,7 @@ func (ts *Test) checkTerms() int {
 	return term
 }
 
+// 暂时没太懂干啥的
 func (ts *Test) checkLogs(i int, m raftapi.ApplyMsg) (string, bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -162,6 +169,7 @@ func (ts *Test) checkNoLeader() {
 	tester.AnnotateCheckerSuccess("no unexpected leader", "no unexpected leader")
 }
 
+// 任何节点在index位置上都不应该有命令被接收
 func (ts *Test) checkNoAgreement(index int) {
 	text := fmt.Sprintf("checking no unexpected agreement at index %v", index)
 	tester.AnnotateCheckerBegin(text)
@@ -177,6 +185,10 @@ func (ts *Test) checkNoAgreement(index int) {
 }
 
 // how many servers think a log entry is committed?
+//
+// index上有多少个节点commit了什么样的命令(apply)
+//
+// return count, cmd
 func (ts *Test) nCommitted(index int) (int, any) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -217,6 +229,11 @@ func (ts *Test) nCommitted(index int) (int, any) {
 // times, in case a leader fails just after Start().
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 3B tests.
+//
+// 这个东西要求你将cmd加入，retry规定了是否能重试，并且由expected节点接收。
+// retry=false，要求你必须2s达到要求，retry=true，只要10s这个命令在里面即可
+//
+// return index
 func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 	var textretry string
 	if retry {
@@ -243,6 +260,7 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 			}
 			if rf != nil {
 				//log.Printf("peer %d Start %v", starts, cmd)
+				// 只要有一个节点加入成功了就可以出来了，所以cmd只能由leader加入
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
@@ -256,6 +274,7 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
+				// 如果没有retry，leader在2s内必须要把日志同步到对应的index位置，并且有expected个节点接收
 				nd, cmd1 := ts.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
 					// committed
@@ -277,6 +296,7 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
+	// 正常流程应该在前面的for就跳出去，如果程序没结束但是出来了就说明代码没过
 	if ts.checkFinished() == false {
 		desp := fmt.Sprintf("agreement of %.8s failed", textcmd)
 		tester.AnnotateCheckerFailure(desp, "failed after 10-second timeout")
@@ -292,6 +312,10 @@ func (ts *Test) checkFinished() bool {
 
 // wait for at least n servers to commit.
 // but don't wait forever.
+//
+// 在某个startTerm内，需要有n个节点将index位置的日志提交(要求在一定时间内完成)
+//
+// return log[idx].cmd
 func (ts *Test) wait(index int, n int, startTerm int) any {
 	to := 10 * time.Millisecond
 	for iters := 0; iters < 30; iters++ {

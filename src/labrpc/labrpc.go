@@ -65,6 +65,7 @@ const (
 	MAXDELAY   = LONGDELAY + 100
 )
 
+// rpc request请求抽象接口，将真正的requestArgs进行encoder序列化再发送
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
 	svcMeth  string      // e.g. "Raft.AppendEntries"
@@ -73,6 +74,7 @@ type reqMsg struct {
 	replyCh  chan replyMsg
 }
 
+// rpc reply的抽象接口，通过将reply进行decoder反序列化回来
 type replyMsg struct {
 	ok    bool
 	reply []byte
@@ -105,6 +107,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	// send the request.
 	//
 	select {
+	// 如果没猜错的话，在初始化end的时候，需要将专门定义好的e.ch传进去，在专门的网络里来处理真正的call请求
 	case e.ch <- req:
 		// the request has been sent.
 	case <-e.done:

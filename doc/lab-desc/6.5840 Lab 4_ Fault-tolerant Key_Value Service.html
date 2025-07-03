@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<!-- saved from url=(0054)https://pdos.csail.mit.edu/6.824/labs/lab-kvraft1.html -->
+<html><script src="chrome-extension://oaljhjociknfmhmfidoogomplhlbdomb/js/ajax-listener-other.js"></script><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+<link rel="stylesheet" href="./6.5840 Lab 4_ Fault-tolerant Key_Value Service_files/style.css" type="text/css">
+<script src="./6.5840 Lab 4_ Fault-tolerant Key_Value Service_files/guidance.js.&#19979;&#36733;"></script>  
+<title>6.5840 Lab 4: Fault-tolerant Key/Value Service</title>
+</head>
+<body inject_video_svd="true"><input id="__bdg__" style="display: none;">
+<div align="center">
+<h2><a href="https://pdos.csail.mit.edu/6.824/index.html">6.5840</a> - Spring 2025</h2>
+<h1>6.5840 Lab 4: Fault-tolerant Key/Value Service</h1>
+
+<p>
+  <b><a href="https://pdos.csail.mit.edu/6.824/labs/collab.html">Collaboration policy</a></b> //
+  <b><a href="https://pdos.csail.mit.edu/6.824/labs/submit.html">Submit lab</a></b> //
+  <b><a href="https://pdos.csail.mit.edu/6.824/labs/go.html">Setup Go</a></b> //
+  <b><a href="https://pdos.csail.mit.edu/6.824/labs/guidance.html">Guidance</a></b> //
+  <b><a href="https://piazza.com/mit/spring2025/65840">Piazza</a></b>
+</p>
+
+</div>
+
+<hr>
+
+<h3>Introduction</h3>
+
+<p>
+In this lab you will build a fault-tolerant key/value storage
+service using your Raft library from
+<a href="https://pdos.csail.mit.edu/6.824/labs/lab-raft1.html">Lab 3</a>.
+To clients, the service looks similar to the server of
+<a href="https://pdos.csail.mit.edu/6.824/labs/lab-kvsrv1.html">Lab 2</a>.
+However, instead of a single server, the service consists
+of a set of servers that use Raft to help them maintain
+identical databases.
+Your key/value service should continue to
+process client requests as long as a majority of the servers
+are alive and can communicate, in spite of other failures or
+network partitions.
+
+After Lab 4, you will have implemented all parts (Clerk, Service, and Raft) shown in the <a href="https://pdos.csail.mit.edu/6.824/figs/kvraft.pdf">diagram of Raft interactions</a>.
+
+</p><p>
+  Clients will interact with your key/value service through a Clerk,
+  as in Lab 2. A Clerk implements the <tt>Put</tt> and <tt>Get</tt>
+  methods with the same semantics as Lab 2: Puts are at-most-once
+  and the Puts/Gets must form a linearizable history.
+  
+</p><p>
+Providing linearizability is relatively easy for a single server. It is
+harder if the service is replicated, since all servers must choose the same
+execution order for concurrent requests, must avoid replying to
+clients using state that isn't up to date, and must recover their
+state after a failure in a way that preserves all acknowledged client
+updates.
+
+</p><p>
+  This lab has three parts. In part A, you will implement a
+  replicated-state machine package, <tt>rsm</tt>, using your raft
+  implementation; <tt>rsm</tt> is agnostic of the requests that it
+  replicates.  In part B, you will implement a replicated key/value
+  service using <tt>rsm</tt>, but without using snapshots.  In part C,
+  you will use your snapshot implementation from Lab 3D, which will
+  allow Raft to discard old log entries. Please submit each part by
+  the respective deadline.
+
+</p><p>
+You should review the
+<a href="https://pdos.csail.mit.edu/6.824/papers/raft-extended.pdf">extended Raft paper</a>,
+in particular Section 7 (but not 8). For a wider
+perspective, have a look at Chubby, Paxos Made Live,
+Spanner, Zookeeper, Harp, Viewstamped Replication, and
+<a href="http://static.usenix.org/event/nsdi11/tech/full_papers/Bolosky.pdf">Bolosky et al.</a>
+
+</p><p>
+Start early.
+
+</p><h3>Getting Started</h3>
+
+<p>
+We supply you with skeleton code and tests in <tt>src/kvraft1</tt>.
+The skeleton code uses the skeleton package <tt>src/kvraft1/rsm</tt> to
+replicate a server.  A server must implement
+the <tt>StateMachine</tt> interface defined in <tt>rsm</tt> to
+replicate itself using <tt>rsm</tt>. Most of your work will be
+implementing <tt>rsm</tt> to provide server-agnostic replication.  You
+will also need to modify <tt>kvraft1/client.go</tt>
+and <tt>kvraft1/server.go</tt> to implement the server-specific parts.
+This split allows you to re-use <tt>rsm</tt> in the next lab.  You may
+be able to re-use some of your Lab 2 code (e.g., re-using the server
+code by copying or importing the <tt>"src/kvsrv1"</tt> package) but it is not a
+requirement.
+
+</p><p>
+To get up and running, execute the following commands.
+Don't forget the <tt>git pull</tt> to get the latest software.
+</p><pre>$ cd ~/6.5840
+$ git pull
+..
+</pre>
+
+<h3>Part A: replicated state machine (RSM) <script>g("moderate/hard")</script>(<a class="moderate/hard" href="https://pdos.csail.mit.edu/6.824/labs/guidance.html">moderate/hard</a>)</h3>
+
+<pre>$ cd src/kvraft1/rsm
+$ go test -v
+=== RUN   TestBasic
+Test RSM basic (reliable network)...
+..
+    config.go:147: one: took too long
+</pre>
+
+<p>
+In the common situation of a client/server service using Raft for
+replication, the service interacts with Raft in two ways: the service
+leader submits client operations by calling <tt>raft.Start()</tt>, and all
+service replicas receive committed operations via Raft's <tt>applyCh</tt>,
+which they execute. On the leader, these two activities interact. At
+any given time, some server goroutines are handling client requests,
+have called <tt>raft.Start()</tt>, and each is waiting for its operation to
+commit and to find out what the result of executing the operation is.
+And as committed operations appear on the <tt>applyCh</tt>, each needs to be
+executed by the service, and the results need to be handed to the goroutine that
+called <tt>raft.Start()</tt> so that it can return the result to the client.
+
+</p><p>
+The <tt>rsm</tt> package encapsulates the above interaction. It sits
+as a layer between the service (e.g. a key/value database) and Raft.
+In <tt>rsm/rsm.go</tt> you will need to implement a "reader" goroutine
+that reads the <tt>applyCh</tt>, and a <tt>rsm.Submit()</tt> function that calls
+<tt>raft.Start()</tt> for a client operation and then waits for the reader
+goroutine to hand it the result of executing that operation.
+
+</p><p>
+The service that is using <tt>rsm</tt> appears to the <tt>rsm</tt>
+reader goroutine as a <tt>StateMachine</tt> object providing
+a <tt>DoOp()</tt> method. The reader goroutine should hand each
+committed operation to <tt>DoOp()</tt>; <tt>DoOp()</tt>'s return value
+should be given to the corresponding <tt>rsm.Submit()</tt> call for
+it to return.
+<tt>DoOp()</tt>'s argument and return value have type
+<tt>any</tt>; the actual values should have the same types as the
+argument and return values that the service passes
+to <tt>rsm.Submit()</tt>, respectively.
+
+</p><p>
+The service should pass each client operation
+to <tt>rsm.Submit()</tt>. To help the reader goroutine match <tt>applyCh</tt>
+messages with waiting calls
+to <tt>rsm.Submit()</tt>, <tt>Submit()</tt> should wrap each client
+operation in an <tt>Op</tt> structure along with a unique identifier.
+<tt>Submit()</tt> should then wait until the operation has committed
+and been executed, and return the result of execution (the
+value returned by <tt>DoOp()</tt>).
+If <tt>raft.Start()</tt> indicates that the current peer is not the
+Raft leader, <tt>Submit()</tt> should return
+an <tt>rpc.ErrWrongLeader</tt> error. <tt>Submit()</tt> should detect
+and handle
+the situation in which leadership changed just after it
+called <tt>raft.Start()</tt>, causing the operation to be lost (never
+committed).
+
+</p><p>
+For Part A, the <tt>rsm</tt> tester acts as the service, submitting
+operations that it interprets as increments on a state consisting of a
+single integer. In Part B you'll use <tt>rsm</tt> as part of a key/value service that
+implements <tt>StateMachine</tt> (and <tt>DoOp()</tt>),
+and calls <tt>rsm.Submit()</tt>.
+
+</p><p>If all goes well, the sequence of events for a client request is:
+  </p><ul>
+    <li> The client sends a request to the service leader.
+    </li><li> The service leader calls <tt>rsm.Submit()</tt> with the request.
+    </li><li> <tt>rsm.Submit()</tt> calls <tt>raft.Start()</tt> with
+      the request, and then waits.
+    </li><li> Raft commits the request and sends it on all peers' <tt>applyCh</tt>s.
+    </li><li> The <tt>rsm</tt> reader goroutine on each peer reads the
+         request from the <tt>applyCh</tt> and passes it to the service's
+         <tt>DoOp()</tt>.
+    </li><li> On the leader, the <tt>rsm</tt> reader goroutine hands
+         the <tt>DoOp()</tt> return value to the <tt>Submit()</tt>
+         goroutine that originally submitted the request, and
+         <tt>Submit()</tt> returns that value.
+  </li></ul>
+
+<p>
+Your servers should not directly communicate; they
+should only interact with each other through Raft.
+
+</p><div class="todo">
+<p>
+  Implement <tt>rsm.go</tt>: the <tt>Submit()</tt> method and
+  a reader goroutine.
+  You have completed this task if
+  you pass the <tt>rsm</tt> 4A tests:
+</p></div>
+
+<pre>  $ cd src/kvraft1/rsm
+  $ go test -v -run 4A
+=== RUN   TestBasic4A
+Test RSM basic (reliable network)...
+  ... Passed --   1.2  3    48    0
+--- PASS: TestBasic4A (1.21s)
+=== RUN   TestLeaderFailure4A
+  ... Passed --  9223372036.9  3    31    0
+--- PASS: TestLeaderFailure4A (1.50s)
+PASS
+ok      6.5840/kvraft1/rsm      2.887s
+</pre>
+
+<ul class="hints">
+
+<li>
+You should not need to add any fields to the Raft <tt>ApplyMsg</tt>,
+or to Raft RPCs such as <tt>AppendEntries</tt>, but you are allowed to do so.    
+
+</li><li> Your solution needs to handle an <tt>rsm</tt> leader that has
+called <tt>Start()</tt> for a request submitted with <tt>Submit()</tt> but
+  loses its leadership before the request is committed to the log.
+  One way to do this is for
+the
+<tt>rsm</tt> to detect that it has lost leadership,
+by noticing that Raft's term has changed or
+a different request has
+appeared at the index returned by <tt>Start()</tt>,
+and return <tt>rpc.ErrWrongLeader</tt> from <tt>Submit()</tt>.
+If the ex-leader is partitioned by
+itself, it won't know about new leaders; but
+any client in the same partition won't be able
+to talk to a new leader either, so it's OK in
+this case for the server to wait
+indefinitely until the partition heals.
+
+</li><li>The tester calls your Raft's <tt>rf.Kill()</tt> when it is
+  shutting down a peer. Raft should close the <tt>applyCh</tt> so that
+  your rsm learns about the shutdown, and can exit out of all loops.
+
+</li></ul>
+
+<h3>Part B: Key/value service without snapshots <script>g("moderate")</script>(<a class="moderate" href="https://pdos.csail.mit.edu/6.824/labs/guidance.html">moderate</a>)</h3>
+
+<pre>$ cd src/kvraft1
+$ go test -v -run TestBasic4B
+=== RUN   TestBasic4B
+Test: one client (4B basic) (reliable network)...
+    kvtest.go:62: Wrong error 
+$
+</pre>
+
+<p>Now you will use the <tt>rsm</tt> package to replicate a
+  key/value server. Each of the servers ("kvservers") will have an
+  associated rsm/Raft peer.  Clerks send <tt>Put()</tt>
+  and <tt>Get()</tt> RPCs to the kvserver whose associated Raft is the
+  leader. The kvserver code submits the Put/Get operation to <tt>rsm</tt>,
+  which replicates it using Raft and invokes your
+  server's <tt>DoOp</tt> at each peer, which should apply the
+  operations to the peer's key/value database; the intent is for the
+  servers to maintain identical replicas of the key/value database.
+
+</p><p>A <tt>Clerk</tt> sometimes doesn't
+know which kvserver is the Raft leader. If the <tt>Clerk</tt> sends an
+RPC to the wrong kvserver, or if it cannot reach the kvserver,
+the <tt>Clerk</tt> should re-try by sending to a different kvserver.
+If the key/value service commits the operation to its Raft log
+(and hence applies the operation to the key/value state machine), the
+leader reports the result to the <tt>Clerk</tt> by responding to its
+RPC. If the operation failed to commit (for example, if the leader was
+replaced), the server reports an error, and the <tt>Clerk</tt> retries with a
+different server.
+
+</p><p>
+Your kvservers should not directly communicate; they
+should only interact with each other through Raft.
+
+</p><div class="todo">
+
+Your first task is to implement a solution that works when there are no dropped
+messages, and no failed servers.
+
+<p>
+Feel free to copy your client code from Lab 2 (<tt>kvsrv1/client.go</tt>)
+into <tt>kvraft1/client.go</tt>. You will need to add logic for deciding which
+kvserver to send each RPC to.
+
+</p><p>
+You'll also need to implement <tt>Put()</tt> and <tt>Get()</tt> RPC
+handlers in <tt>server.go</tt>. These handlers should submit the
+request to Raft using <tt>rsm.Submit()</tt>. As the <tt>rsm</tt>
+package reads commands from
+<tt>applyCh</tt>, it should invoke the <tt>DoOp</tt> method, which you
+will have to implement in <tt>server.go</tt>.
+
+</p><p>
+You have completed this task when you
+<strong>reliably</strong> pass the first test in the
+test suite, with <tt>go test -v -run TestBasic4B</tt>.
+</p></div>
+
+<ul class="hints">
+
+<li>
+A kvserver should not complete a <tt>Get()</tt> RPC if it is not part
+of a majority (so that it does not serve stale data). A simple
+solution is to enter every <tt>Get()</tt> (as well as
+each <tt>Put()</tt>) in the Raft log using <tt>Submit()</tt>. You don't
+have to implement the optimization for read-only operations that is
+described in Section 8.
+
+</li><li>
+It's best to add locking from the start because the
+need to avoid deadlocks sometimes affects overall code design. Check
+that your code is race-free using
+<tt>go test -race</tt>.
+
+</li></ul>
+
+Now you should modify your solution to continue in the face of network
+and server failures.
+One problem you'll face is that a
+<tt>Clerk</tt> may have to send an RPC multiple times until it finds a 
+kvserver that replies positively. If a leader fails just after
+committing an entry to the Raft log, the <tt>Clerk</tt> may not
+receive a reply, and thus may 
+re-send the request to another leader.
+Each call to
+<tt>Clerk.Put()</tt> should
+result in just a single execution for a particular version number.
+
+<p class="todo">
+  Add code to handle failures.  Your <tt>Clerk</tt> can use a similar
+  retry plan as in lab 2, including returning <tt>ErrMaybe</tt> if a
+  response to a retried <tt>Put</tt> RPC is lost.
+  You are done when your code reliably passes all the 4B tests, with
+  <tt>go test -v -run 4B</tt>.
+
+</p><ul class="hints">
+
+  <li>Recall that the rsm leader may lose its leadership and return
+    <tt>rpc.ErrWrongLeader</tt> from <tt>Submit()</tt>.  In this case you
+    should arrange for the Clerk to re-send the request to other
+    servers until it finds the new leader.
+
+</li><li>
+You will probably have to modify your 
+Clerk to remember which server turned out to
+be the leader for the last RPC, and send the
+next RPC to that server first. This will avoid
+wasting time searching for the leader on every
+RPC, which may help you pass some of the tests
+quickly enough.
+
+</li></ul>
+
+<p>
+Your code should now pass the Lab 4B tests, like this:
+
+</p><pre>$ cd kvraft1
+$ go test -run 4B
+Test: one client (4B basic) ...
+  ... Passed --   3.2  5  1041  183
+Test: one client (4B speed) ...
+  ... Passed --  15.9  3  3169    0
+Test: many clients (4B many clients) ...
+  ... Passed --   3.9  5  3247  871
+Test: unreliable net, many clients (4B unreliable net, many clients) ...
+  ... Passed --   5.3  5  1035  167
+Test: unreliable net, one client (4B progress in majority) ...
+  ... Passed --   2.9  5   155    3
+Test: no progress in minority (4B) ...
+  ... Passed --   1.6  5   102    3
+Test: completion after heal (4B) ...
+  ... Passed --   1.3  5    67    4
+Test: partitions, one client (4B partitions, one client) ...
+  ... Passed --   6.2  5   958  155
+Test: partitions, many clients (4B partitions, many clients (4B)) ...
+  ... Passed --   6.8  5  3096  855
+Test: restarts, one client (4B restarts, one client 4B ) ...
+  ... Passed --   6.7  5   311   13
+Test: restarts, many clients (4B restarts, many clients) ...
+  ... Passed --   7.5  5  1223   95
+Test: unreliable net, restarts, many clients (4B unreliable net, restarts, many clients ) ...
+  ... Passed --   8.4  5   804   33
+Test: restarts, partitions, many clients (4B restarts, partitions, many clients) ...
+  ... Passed --  10.1  5  1308  105
+Test: unreliable net, restarts, partitions, many clients (4B unreliable net, restarts, partitions, many clients) ...
+  ... Passed --  11.9  5  1040   33
+Test: unreliable net, restarts, partitions, random keys, many clients (4B unreliable net, restarts, partitions, random keys, many clients) ...
+  ... Passed --  12.1  7  2801   93
+PASS
+ok      6.5840/kvraft1  103.797s
+</pre>
+
+<p>
+The numbers after each <tt>Passed</tt> are real time in seconds,
+number of peers, number of RPCs sent (including client RPCs), and
+number of key/value operations executed (<tt>Clerk</tt> Get/Put
+calls).
+
+</p><h3>Part C: Key/value service with snapshots <script>g("moderate")</script>(<a class="moderate" href="https://pdos.csail.mit.edu/6.824/labs/guidance.html">moderate</a>)</h3>
+
+<p>
+As things stand now, your key/value server doesn't call your Raft
+library's <tt>Snapshot()</tt> method, so a rebooting server has to
+replay the complete persisted Raft log in order to restore its state.
+Now you'll modify kvserver and <tt>rsm</tt> to cooperate with Raft to save log space
+and reduce restart time, using Raft's <tt>Snapshot()</tt> from Lab 3D.
+
+</p><p>
+The tester passes <tt>maxraftstate</tt> to your
+<tt>StartKVServer()</tt>, which passes it
+to <tt>rsm</tt>. <tt>maxraftstate</tt> indicates the maximum allowed
+size of your persistent Raft state in bytes (including the log, but
+not including snapshots). You should compare <tt>maxraftstate</tt>
+to <tt>rf.PersistBytes()</tt>.  Whenever your <tt>rsm</tt>
+detects that the Raft state size is approaching this threshold, it
+should save a snapshot by calling
+Raft's <tt>Snapshot</tt>.  <tt>rsm</tt> can create this snapshot
+by calling the <tt>Snapshot</tt> method of the <tt>StateMachine</tt>
+interface to obtain a snapshot of the kvserver.
+If <tt>maxraftstate</tt> is -1, you do not have to snapshot.
+The <tt>maxraftstate</tt> limit applies to the GOB-encoded
+bytes your Raft passes as the first argument to
+<tt>persister.Save()</tt>.  
+
+</p><p>
+You can find the source for the <tt>persister</tt> object in
+<tt>tester1/persister.go</tt>.
+
+</p><p class="todo">
+Modify your rsm so that it detects when the persisted Raft state
+grows too large, and then hands a snapshot to Raft.  When
+a <tt>rsm</tt> server restarts, it should read the snapshot
+with <tt>persister.ReadSnapshot()</tt> and, if the snapshot's
+length is greater than zero, pass the snapshot to the
+<tt>StateMachine</tt>'s <tt>Restore()</tt> method.
+You complete this task if you
+pass TestSnapshot4C in <tt>rsm</tt>.
+
+</p><pre>$ cd kvraft1/rsm
+$ go test -run TestSnapshot4C
+=== RUN   TestSnapshot4C
+  ... Passed --  9223372036.9  3   230    0
+--- PASS: TestSnapshot4C (3.88s)
+PASS
+ok      6.5840/kvraft1/rsm      3.882s
+</pre>
+
+<ul class="hints">
+<li>
+Think about when <tt>rsm</tt> should snapshot its state and what
+should be included in the snapshot beyond just the server state. Raft
+stores each snapshot in the persister object using
+<tt>Save()</tt>,
+along with corresponding Raft state.
+You can read the
+latest stored snapshot using <tt>ReadSnapshot()</tt>.
+</li><li>Capitalize all fields of structures stored in the snapshot.
+</li></ul>
+
+<p class="todo">
+  Implement the <tt>kvraft1/server.go</tt> <tt>Snapshot()</tt> and <tt>Restore()</tt>
+  methods, which <tt>rsm</tt> calls.
+  Modify <tt>rsm</tt> to handle applyCh messages that contain
+  snapshots.
+</p><ul class="hints">
+<li>You may have bugs in your Raft and rsm library that this task
+  exposes.  If you make changes to your Raft implementation make sure
+  it continues to pass all of the Lab 3 tests.
+</li><li>
+A reasonable amount of time to take for the Lab 4 tests is 400 seconds
+of real time and 700 seconds of CPU time.
+</li></ul>
+
+<p>
+Your code should pass the 4C tests (as in the example here) as well
+as the 4A+B tests (and your Raft must continue to pass the Lab 3 tests).
+</p><pre>$ go test -run 4C
+Test: snapshots, one client (4C SnapshotsRPC) ...
+Test: InstallSnapshot RPC (4C) ...
+  ... Passed --   4.5  3   241   64
+Test: snapshots, one client (4C snapshot size is reasonable) ...
+  ... Passed --  11.4  3  2526  800
+Test: snapshots, one client (4C speed) ...
+  ... Passed --  14.2  3  3149    0
+Test: restarts, snapshots, one client (4C restarts, snapshots, one client) ...
+  ... Passed --   6.8  5   305   13
+Test: restarts, snapshots, many clients (4C restarts, snapshots, many clients ) ...
+  ... Passed --   9.0  5  5583  795
+Test: unreliable net, snapshots, many clients (4C unreliable net, snapshots, many clients) ...
+  ... Passed --   4.7  5   977  155
+Test: unreliable net, restarts, snapshots, many clients (4C unreliable net, restarts, snapshots, many clients) ...
+  ... Passed --   8.6  5   847   33
+Test: unreliable net, restarts, partitions, snapshots, many clients (4C unreliable net, restarts, partitions, snapshots, many clients) ...
+  ... Passed --  11.5  5   841   33
+Test: unreliable net, restarts, partitions, snapshots, random keys, many clients (4C unreliable net, restarts, partitions, snapshots, random keys, many clients) ...
+  ... Passed --  12.8  7  2903   93
+PASS
+ok      6.5840/kvraft1  83.543s
+</pre>
+
+
+
+
+
+
+
+
+
+
+
+<div id="videoPopupMenu"></div></body><div style="all: initial;"><div id="__hcfy__" style="all: initial;"><template shadowrootmode="open"><style>#root{-webkit-text-size-adjust:100%;box-sizing:border-box;font-size:14px;font-weight:400;letter-spacing:0;line-height:1.28581;text-transform:none;color:#182026;font-family:-apple-system,"BlinkMacSystemFont","Segoe UI","Roboto","Oxygen","Ubuntu","Cantarell","Open Sans","Helvetica Neue","Icons16",sans-serif;touch-action:manipulation}#root>.bp5-portal{z-index:9999999999}</style><link rel="stylesheet" href="chrome-extension://oikmahiipjniocckomdccmplodldodja/normalize.css"><link rel="stylesheet" href="chrome-extension://oikmahiipjniocckomdccmplodldodja/blueprint.css"><link rel="stylesheet" href="chrome-extension://oikmahiipjniocckomdccmplodldodja/blueprint-select.css"><link rel="stylesheet" href="chrome-extension://oikmahiipjniocckomdccmplodldodja/cropper.css"><style>#translate-panel{background-color:#f6f7f9;display:flex;flex-direction:column;padding-bottom:8px}.bp5-dark #translate-panel{background-color:#1c2127}#translate-panel .fixed{flex-shrink:0;margin-bottom:10px}#translate-panel .body{flex-grow:1;overflow:auto;overscroll-behavior:contain}#translate-panel .body::-webkit-scrollbar{width:8px;background-color:rgba(0,0,0,0);-webkit-border-radius:100px}#translate-panel .body::-webkit-scrollbar:hover{background-color:rgba(0,0,0,.09)}#translate-panel .body::-webkit-scrollbar-thumb:vertical{background:rgba(0,0,0,.5);-webkit-border-radius:100px}#translate-panel .body::-webkit-scrollbar-thumb:vertical:active{background:rgba(0,0,0,.61);-webkit-border-radius:100px}#translate-panel.size-small,#translate-panel.size-small h6.bp5-heading,#translate-panel.size-small .bp5-control.bp5-large,#translate-panel.size-small textarea.bp5-input.bp5-small{font-size:14px}#translate-panel.size-small .phonetic-item,#translate-panel.size-small .quick-settings a{font-size:12px}#translate-panel.size-middle,#translate-panel.size-middle h6.bp5-heading,#translate-panel.size-middle .bp5-control.bp5-large,#translate-panel.size-middle textarea.bp5-input{font-size:18px}#translate-panel.size-middle .phonetic-item,#translate-panel.size-middle .quick-settings a{font-size:14px}#translate-panel.size-large,#translate-panel.size-large h6.bp5-heading,#translate-panel.size-large .bp5-control.bp5-large,#translate-panel.size-large textarea.bp5-input.bp5-large{font-size:22px}#translate-panel.size-large .source,#translate-panel.size-large .phonetic-item,#translate-panel.size-large .quick-settings a{font-size:18px}#translate-panel .bp5-button.bp5-small,#translate-panel .bp5-small .bp5-button{min-height:20px;min-width:20px}#translate-panel .header{display:flex;align-items:center;padding:4px 6px 4px 10px;border-bottom:1px solid #d1d1d1}.bp5-dark #translate-panel .header{border-bottom-color:rgba(17,20,24,.4)}#translate-panel .header .drag-block{min-width:5px;flex-shrink:0;flex-grow:1;align-self:stretch}#translate-panel .header .left{flex-shrink:0;display:flex}#translate-panel .header .right{flex-shrink:0;display:flex;align-items:center}#translate-panel .header .right .bp5-icon-arrow-right{flex-shrink:0;margin:0 5px}#translate-panel .header .right>.bp5-button{flex-shrink:0;margin:0 1px}#translate-panel .header .right>.bp5-button:last-child{margin-right:0}#translate-panel .quick-settings{padding:4px 9px;margin:0 1px}#translate-panel .quick-settings>div{margin-bottom:5px}#translate-panel .quick-settings .bp5-control{margin-bottom:0}#translate-panel .query-text{position:relative;padding:10px 10px 2px 10px}#translate-panel .query-text textarea.bp5-input{min-height:44px;font-family:system-ui,-apple-system,"Segoe UI","Roboto","Ubuntu","Cantarell","Noto Sans",sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";overscroll-behavior:contain}#translate-panel .query-text .translate-btn{position:absolute;opacity:.6}#translate-panel .query-text .translate-btn:hover{opacity:1}#translate-panel .body{padding:0 10px}#translate-panel .body .bp5-card:first-child{margin-top:1px}#translate-panel .body .bp5-card:last-child{margin-bottom:1px}#translate-panel .body .no-api{margin:20px 0}.result-block{margin:8px 0;padding:2px 5px}.result-block .bp5-button{visibility:hidden}.result-block .error .bp5-button,.result-block:hover .bp5-button{visibility:visible}.result-block .legend{display:flex;align-items:center;justify-content:space-between}.result-block .legend .legend-left{display:flex;align-items:center}.result-block .legend .api-ico,.result-block .legend .bp5-heading{flex-shrink:0;white-space:nowrap}.result-block .legend .api-ico{display:inline-block;width:14px;height:14px;background-size:contain;margin-right:3px}.result-block .legend .bp5-heading{margin-bottom:0;margin-right:10px}.result-block .legend .source{cursor:pointer;font-size:12px;display:inline-flex;align-items:center}.result-block .legend .source .source-text{overflow:hidden}.result-block .legend .source .bp5-icon{position:relative;top:-1px;margin-left:1px}.result-block .phonetic{display:flex;flex-wrap:wrap}.result-block .phonetic .phonetic-item{display:flex;align-items:center;font-size:12px}.result-block .phonetic .phonetic-item:not(:last-child){margin-right:12px}.result-block .common-result p{line-height:1.3;margin:2px 0;overflow-wrap:break-word}.result-block .common-result .dict a{text-decoration:underline}.result-block .error{font-size:12px;padding:5px 10px}.result-block .dict-pos{margin-right:5px}.external-translators{margin-bottom:3px;padding:0;display:flex;flex-wrap:wrap}.external-translators>div{margin:0 5px 5px 0}.quick-links a{margin:0 5px 5px 0}#popper-container{width:250px;max-width:100%;position:absolute;left:0;top:0;z-index:9999999998;touch-action:none;transition:opacity .2s;background-color:#f6f7f9}.bp5-dark #popper-container{background-color:#1c2127}#popper-container.show{opacity:1;pointer-events:auto;user-select:auto}#popper-container,#popper-container[data-popper-reference-hidden=true]{opacity:0;pointer-events:none;user-select:none}#popper-container .drag-block{cursor:grab}#popper-container.pin{position:fixed}#popper-container.pin .arrow{display:none}#popper-container .arrow,#popper-container .arrow::before{position:absolute;width:8px;height:8px;z-index:-1}#popper-container .arrow::before{content:"";transform:rotate(45deg);background:#f6f7f9}.bp5-dark #popper-container .arrow::before{background-color:#1c2127}#popper-container .arrow{display:none}#popper-container.show[data-popper-placement]:not([data-popper-reference-hidden=true]) .arrow{display:block}#popper-container[data-popper-placement^=top] .arrow{bottom:-5px}#popper-container[data-popper-placement^=top] .arrow::before{border-right:1px solid #d1d1d1;border-bottom:1px solid #d1d1d1}#popper-container[data-popper-placement^=bottom] .arrow{top:-5px}#popper-container[data-popper-placement^=bottom] .arrow::before{border-left:1px solid #d1d1d1;border-top:1px solid #d1d1d1}#popper-container[data-popper-placement^=left] .arrow{right:-5px}#popper-container[data-popper-placement^=left] .arrow::before{border-right:1px solid #d1d1d1;border-top:1px solid #d1d1d1}#popper-container[data-popper-placement^=right] .arrow{left:-5px}#popper-container[data-popper-placement^=right] .arrow::before{border-left:1px solid #d1d1d1;border-bottom:1px solid #d1d1d1}#translate-btn{display:none;position:absolute;z-index:9999999999;left:0;top:0}#translate-btn .bp5-button{padding:2px;min-width:0;min-height:0}#translate-btn .btn-icon{width:18px;height:18px;background-image:url(chrome-extension://oikmahiipjniocckomdccmplodldodja/logo.png);background-size:contain}.bp5-dark #translate-btn .btn-icon{background-image:url(chrome-extension://oikmahiipjniocckomdccmplodldodja/logowhite36.png)}#translate-btn.show{display:block}.translate-type-selector .bp5-label{display:inline}.translate-type-selector .bp5-radio{margin-bottom:0}#ocr-container{position:fixed;z-index:99999999999999;left:0;top:0;right:0;bottom:0}#ocr-container .toolbar{display:none;position:absolute;z-index:1}#ocr-container img{max-width:100%}#app{cursor:default}.switch-pin{flex-shrink:0;cursor:pointer}.switch-pin .bp5-icon-pin{transition:transform .2s,color .2s;transform:rotate(-45deg)}.pin .switch-pin .bp5-icon-pin{transform:rotate(-70deg)}.cut-btn{margin-left:2px}.app-toaster-container{position:fixed !important;z-index:9999999999 !important}.app-toaster-container .bp5-toast{min-width:auto}#web-trs-panel .app-toaster-container{padding-right:0;padding-left:0}#web-trs-panel .page-trs-form-group{margin:0 0 0 0;align-items:center}#web-trs-panel .page-trs-form-group>label{width:70px}</style><div id="root" dir="ltr"><div id="app"><div id="translate-btn"><button type="button" class="bp5-button"><span class="btn-icon"></span></button></div><div id="popper-container" class="bp5-elevation-4" style="width: 290px; transform: translate(0px, 0px);"><div id="translate-panel" class="size-small"><div class="fixed"><div class="header"><div class="left"><div class="switch-pin"><button type="button" class="bp5-button bp5-minimal bp5-small"><span aria-hidden="true" class="bp5-icon bp5-icon-pin"><svg data-icon="pin" height="14" role="img" viewBox="0 0 16 16" width="14"><path d="M9.41.92c-.51.51-.41 1.5.15 2.56L4.34 7.54C2.8 6.48 1.45 6.05.92 6.58l3.54 3.54-3.54 4.95 4.95-3.54 3.54 3.54c.53-.53.1-1.88-.96-3.42l4.06-5.22c1.06.56 2.04.66 2.55.15L9.41.92z" fill-rule="evenodd"></path></svg></span></button></div><button type="button" title="&#22270;&#29255;&#32763;&#35793;" class="bp5-button bp5-minimal bp5-small"><span aria-hidden="true" class="bp5-icon bp5-icon-media"><svg data-icon="media" height="14" role="img" viewBox="0 0 16 16" width="14"><path d="M11.99 6.99c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm3-5h-14c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h14c.55 0 1-.45 1-1v-10c0-.55-.45-1-1-1zm-1 9l-5-3-1 2-3-4-3 5v-7h12v7z" fill-rule="evenodd"></path></svg></span></button><button type="button" title="&#35821;&#38899;&#32763;&#35793;" class="bp5-button bp5-minimal bp5-small"><span class="bp5-icon"><svg version="1.1" id="Capa_1" width="14" height="14" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" viewBox="0 0 490.9 490.9" xml:space="preserve"><g><g><path d="M245.5,322.9c53,0,96.2-43.2,96.2-96.2V96.2c0-53-43.2-96.2-96.2-96.2s-96.2,43.2-96.2,96.2v130.5 C149.3,279.8,192.5,322.9,245.5,322.9z M173.8,96.2c0-39.5,32.2-71.7,71.7-71.7s71.7,32.2,71.7,71.7v130.5 c0,39.5-32.2,71.7-71.7,71.7s-71.7-32.2-71.7-71.7V96.2z"></path><path d="M94.4,214.5c-6.8,0-12.3,5.5-12.3,12.3c0,85.9,66.7,156.6,151.1,162.8v76.7h-63.9c-6.8,0-12.3,5.5-12.3,12.3 s5.5,12.3,12.3,12.3h152.3c6.8,0,12.3-5.5,12.3-12.3s-5.5-12.3-12.3-12.3h-63.9v-76.7c84.4-6.3,151.1-76.9,151.1-162.8 c0-6.8-5.5-12.3-12.3-12.3s-12.3,5.5-12.3,12.3c0,76.6-62.3,138.9-138.9,138.9s-138.9-62.3-138.9-138.9 C106.6,220,101.2,214.5,94.4,214.5z"></path></g></g></svg></span></button></div><div class="drag-block" title="&#25353;&#20303;&#19981;&#25918;&#21487;&#20197;&#25302;&#21160;"></div><div class="right"><button type="button" disabled="" title="&#28155;&#21152;&#21040;&#25910;&#34255;&#22841;" tabindex="-1" class="bp5-button bp5-disabled bp5-minimal bp5-small"><span aria-hidden="true" class="bp5-icon bp5-icon-star-empty"><svg data-icon="star-empty" height="14" role="img" viewBox="0 0 16 16" width="14"><path d="M16 6.11l-5.53-.84L8 0 5.53 5.27 0 6.11l4 4.1L3.06 16 8 13.27 12.94 16 12 10.21l4-4.1zM4.91 13.2l.59-3.62L3 7.02l3.45-.53L8 3.2l1.55 3.29 3.45.53-2.5 2.56.59 3.62L8 11.49 4.91 13.2z" fill-rule="evenodd"></path></svg></span></button><span class="bp5-popover-target"><button type="button" class="bp5-button bp5-minimal bp5-small settings" title="&#24555;&#25463;&#35774;&#32622;" aria-expanded="false" aria-haspopup="menu"><span aria-hidden="true" class="bp5-icon bp5-icon-cog"><svg data-icon="cog" height="14" role="img" viewBox="0 0 16 16" width="14"><path d="M15.19 6.39h-1.85c-.11-.37-.27-.71-.45-1.04l1.36-1.36c.31-.31.31-.82 0-1.13l-1.13-1.13a.803.803 0 00-1.13 0l-1.36 1.36c-.33-.17-.67-.33-1.04-.44V.79c0-.44-.36-.8-.8-.8h-1.6c-.44 0-.8.36-.8.8v1.86c-.39.12-.75.28-1.1.47l-1.3-1.3c-.3-.3-.79-.3-1.09 0L1.82 2.91c-.3.3-.3.79 0 1.09l1.3 1.3c-.2.34-.36.7-.48 1.09H.79c-.44 0-.8.36-.8.8v1.6c0 .44.36.8.8.8h1.85c.11.37.27.71.45 1.04l-1.36 1.36c-.31.31-.31.82 0 1.13l1.13 1.13c.31.31.82.31 1.13 0l1.36-1.36c.33.18.67.33 1.04.44v1.86c0 .44.36.8.8.8h1.6c.44 0 .8-.36.8-.8v-1.86c.39-.12.75-.28 1.1-.47l1.3 1.3c.3.3.79.3 1.09 0l1.09-1.09c.3-.3.3-.79 0-1.09l-1.3-1.3c.19-.35.36-.71.48-1.1h1.85c.44 0 .8-.36.8-.8v-1.6a.816.816 0 00-.81-.79zm-7.2 4.6c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3z" fill-rule="evenodd"></path></svg></span></button></span><button type="button" title="&#20851;&#38381;(Esc)" class="bp5-button bp5-minimal bp5-small"><span aria-hidden="true" class="bp5-icon bp5-icon-cross"><svg data-icon="cross" height="18" role="img" viewBox="0 0 16 16" width="18"><path d="M9.41 8l3.29-3.29c.19-.18.3-.43.3-.71a1.003 1.003 0 00-1.71-.71L8 6.59l-3.29-3.3a1.003 1.003 0 00-1.42 1.42L6.59 8 3.3 11.29c-.19.18-.3.43-.3.71a1.003 1.003 0 001.71.71L8 9.41l3.29 3.29c.18.19.43.3.71.3a1.003 1.003 0 00.71-1.71L9.41 8z" fill-rule="evenodd"></path></svg></span></button></div></div><div class="bp5-collapse"><div class="bp5-collapse-body" aria-hidden="true"><div class="quick-settings bp5-card bp5-elevation-0"><div><span aria-controls="listbox-0" class="lang-select bp5-popover-target" aria-expanded="false" aria-haspopup="listbox" role="combobox"><button type="button" class="bp5-button bp5-small"><span class="bp5-button-text">&#33258;&#21160;&#26816;&#27979;</span><span aria-hidden="true" class="bp5-icon bp5-icon-caret-down"><svg data-icon="caret-down" height="16" role="img" viewBox="0 0 16 16" width="16"><path d="M12 6.5c0-.28-.22-.5-.5-.5h-7a.495.495 0 00-.37.83l3.5 4c.09.1.22.17.37.17s.28-.07.37-.17l3.5-4c.08-.09.13-.2.13-.33z" fill-rule="evenodd"></path></svg></span></button></span><span aria-hidden="true" class="bp5-icon bp5-icon-arrow-right" style="margin: 0px 10px;"><svg data-icon="arrow-right" height="12" role="img" viewBox="0 0 16 16" width="12"><path d="M14.7 7.29l-5-5a.965.965 0 00-.71-.3 1.003 1.003 0 00-.71 1.71l3.29 3.29H1.99c-.55 0-1 .45-1 1s.45 1 1 1h9.59l-3.29 3.29a1.003 1.003 0 001.42 1.42l5-5c.18-.18.29-.43.29-.71s-.12-.52-.3-.7z" fill-rule="evenodd"></path></svg></span><span aria-controls="listbox-1" class="lang-select bp5-popover-target" aria-expanded="false" aria-haspopup="listbox" role="combobox"><button type="button" class="bp5-button bp5-small"><span class="bp5-button-text">&#20013;&#25991;(&#31616;&#20307;)</span><span aria-hidden="true" class="bp5-icon bp5-icon-caret-down"><svg data-icon="caret-down" height="16" role="img" viewBox="0 0 16 16" width="16"><path d="M12 6.5c0-.28-.22-.5-.5-.5h-7a.495.495 0 00-.37.83l3.5 4c.09.1.22.17.37.17s.28-.07.37-.17l3.5-4c.08-.09.13-.2.13-.33z" fill-rule="evenodd"></path></svg></span></button></span></div><div><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox" checked=""><span class="bp5-control-indicator"></span>&#35895;&#27468;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox" checked=""><span class="bp5-control-indicator"></span>DeepL(&#20869;&#32622;)</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>DeepL</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>ChatGPT</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>Claude</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>Gemini</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#30789;&#22522;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#28151;&#20803;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#25991;&#24515;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#26234;&#35889;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#35910;&#21253;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#36890;&#20041;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>DeepSeek</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#38646;&#19968;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>MiniMax</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#30334;&#24029;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>Kimi</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#30334;&#24230;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#30334;&#24230;(&#19987;&#19994;&#29256;)</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#33150;&#35759;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#24425;&#20113;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#38463;&#37324;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#38463;&#37324;(&#19987;&#19994;&#29256;)</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#26377;&#36947;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#28779;&#23665;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox" checked=""><span class="bp5-control-indicator"></span>&#24517;&#24212;&#35789;&#20856;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#25628;&#29399;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox" checked=""><span class="bp5-control-indicator"></span>Yandex</label><div style="margin-top: 4px;"><a class="bp5-text-small">&#36141;&#20080;&#22871;&#39184;&#21253;&#21518;&#21487;&#30452;&#25509;&#20351;&#29992;&#20197;&#19978;&#25152;&#26377;&#26381;&#21153;</a></div></div><div><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#33258;&#21160;&#26391;&#35835;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#33258;&#21160;&#22797;&#21046;</label></div><div role="radiogroup" class="bp5-radio-group"><label class="bp5-control bp5-radio bp5-inline"><input name="Blueprint5.RadioGroup-0" type="radio" value="small" checked=""><span class="bp5-control-indicator"></span>&#23567;</label><label class="bp5-control bp5-radio bp5-inline"><input name="Blueprint5.RadioGroup-0" type="radio" value="middle"><span class="bp5-control-indicator"></span>&#20013;</label><label class="bp5-control bp5-radio bp5-inline"><input name="Blueprint5.RadioGroup-0" type="radio" value="large"><span class="bp5-control-indicator"></span>&#22823;</label></div><div><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#26174;&#31034;&#25991;&#26412;&#26694;</label><label class="bp5-control bp5-checkbox bp5-inline" style="margin-right: 0px;"><input type="checkbox"><span class="bp5-control-indicator"></span>&#40736;&#26631;&#24748;&#28014;&#21462;&#35789;</label></div><a class="bp5-text-small">&#25171;&#24320;&#23436;&#25972;&#35774;&#32622;</a></div></div></div></div><div class="body"><p>&#35831;&#36755;&#20837;&#38656;&#35201;&#32763;&#35793;&#30340;&#25991;&#26412;&#12290;</p></div></div><div class="arrow"></div></div><div id="web-trs-panel"></div></div></div></template></div></div></html>

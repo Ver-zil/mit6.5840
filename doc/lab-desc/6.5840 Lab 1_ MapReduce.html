@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<!-- saved from url=(0049)https://pdos.csail.mit.edu/6.824/labs/lab-mr.html -->
+<html><script src="chrome-extension://oaljhjociknfmhmfidoogomplhlbdomb/js/ajax-listener-other.js"></script><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+<title>6.5840 Lab 1: MapReduce</title>
+<link rel="stylesheet" href="./6.5840 Lab 1_ MapReduce_files/style.css" type="text/css">
+<script src="./6.5840 Lab 1_ MapReduce_files/guidance.js.&#19979;&#36733;"></script>
+</head>
+<body inject_video_svd="true"><input id="__bdg__" style="display: none;">
+<div align="center">
+<h2><a href="https://pdos.csail.mit.edu/6.824/index.html">6.5840</a> - Spring 2025</h2>
+<h1>6.5840 Lab 1: MapReduce</h1>
+
+<center>
+<p>
+  <b><a href="https://pdos.csail.mit.edu/6.824/labs/collab.html">Collaboration policy</a></b> //
+  <b><a href="https://pdos.csail.mit.edu/6.824/labs/submit.html">Submit lab</a></b> //
+  <b><a href="https://pdos.csail.mit.edu/6.824/labs/go.html">Setup Go</a></b> //
+  <b><a href="https://pdos.csail.mit.edu/6.824/labs/guidance.html">Guidance</a></b> //
+  <b><a href="https://piazza.com/mit/spring2025/65840">Piazza</a></b>
+</p>
+</center>
+
+</div>
+<hr>
+
+<h3>Introduction</h3>
+
+<p>
+In this lab you'll build a MapReduce system.
+You'll implement a worker process that calls application Map and Reduce
+functions and handles reading and writing files,
+and a coordinator process that hands out tasks to
+workers and copes with failed workers.
+You'll be building something similar to the
+<a href="http://research.google.com/archive/mapreduce-osdi04.pdf">MapReduce paper</a>.
+(Note: this lab uses "coordinator" instead of the paper's "master".)
+
+</p><h3>Getting started</h3>
+
+<p>You need to <a href="https://pdos.csail.mit.edu/6.824/labs/go.html">setup Go</a> to do the labs.
+
+</p><p>
+Fetch the initial lab software with
+<a href="https://git-scm.com/">git</a> (a version control system).
+To learn more about git, look at the
+<a href="https://git-scm.com/book/en/v2">Pro Git book</a> or the
+<a href="http://www.kernel.org/pub/software/scm/git/docs/user-manual.html">git user's manual</a>.
+
+</p><pre>$ git clone git://g.csail.mit.edu/6.5840-golabs-2025 6.5840
+$ cd 6.5840
+$ ls
+Makefile src
+$
+</pre>
+
+<p>
+We supply you with a simple sequential mapreduce implementation in
+<tt>src/main/mrsequential.go</tt>. It runs the maps and reduces one at a
+time, in a single process. We also
+provide you with a couple of MapReduce applications: word-count
+in <tt>mrapps/wc.go</tt>, and a text indexer
+in <tt>mrapps/indexer.go</tt>. You can run
+word count sequentially as follows:
+
+</p><pre>$ cd ~/6.5840
+$ cd src/main
+$ go build -buildmode=plugin ../mrapps/wc.go
+$ rm mr-out*
+$ go run mrsequential.go wc.so pg*.txt
+$ more mr-out-0
+A 509
+ABOUT 2
+ACT 8
+...
+</pre>
+
+<p>
+<tt>mrsequential.go</tt> leaves its output in the file <tt>mr-out-0</tt>.
+The input is from the text files named <tt>pg-xxx.txt</tt>.
+
+</p><p>
+Feel free to borrow code from <tt>mrsequential.go</tt>.
+You should also have a look at <tt>mrapps/wc.go</tt> to see what
+MapReduce application code looks like.
+
+</p><p>
+For this lab and all the others, we might issue updates to the code we
+provide you. To ensure that you can fetch those updates and easily
+merge them using <tt>git pull</tt>, it's best to leave the code we
+provide in the original files. You can add to the code we provide as
+directed in the lab write-ups; just don't move it. It's OK to put your
+own new functions in new files.
+
+</p><h3>Your Job <script>g("moderate/hard")</script>(<a class="moderate/hard" href="https://pdos.csail.mit.edu/6.824/labs/guidance.html">moderate/hard</a>)</h3>
+
+Your job is to implement a distributed MapReduce, consisting of
+two programs, the coordinator and the worker. There will be
+just one coordinator process, and one or more worker processes executing in
+parallel. In a real system the workers would run on a bunch of
+different machines, but for this lab you'll run them all on a single machine.
+The workers will talk to the coordinator via RPC. Each worker process will,
+in a loop, ask
+the coordinator for a task, read the task's input from one or more files,
+execute the task, write the task's output to one
+or more files, and again ask the coordinator for a
+new task. The coordinator should notice if a worker hasn't completed
+its task in a reasonable amount of time (for this lab, use ten
+seconds), and give the same task to a different worker.
+
+<p>
+We have given you a little code to start you off. The "main" routines for
+the coordinator and worker are in <tt>main/mrcoordinator.go</tt> and <tt>main/mrworker.go</tt>;
+don't change these files. You should put your implementation in <tt>mr/coordinator.go</tt>,
+<tt>mr/worker.go</tt>, and <tt>mr/rpc.go</tt>.
+
+</p><p>
+Here's how to run your code on the word-count MapReduce
+application. First, make sure the word-count plugin is
+freshly built:
+</p><pre>$ go build -buildmode=plugin ../mrapps/wc.go
+</pre>
+
+In the <tt>main</tt> directory, run the coordinator.
+<pre>$ rm mr-out*
+$ go run mrcoordinator.go pg-*.txt
+</pre>
+
+The <tt>pg-*.txt</tt> arguments to <tt>mrcoordinator.go</tt> are
+the input files; each file corresponds to one "split", and is the
+input to one Map task.
+
+<p>
+In one or more other windows, run some workers:
+</p><pre>$ go run mrworker.go wc.so
+</pre>
+
+When the workers and coordinator have finished, look at the output
+in <tt>mr-out-*</tt>. When you've completed the lab, the
+sorted union of the output files should match the sequential
+output, like this:
+<pre>$ cat mr-out-* | sort | more
+A 509
+ABOUT 2
+ACT 8
+...
+</pre>
+
+<p>
+We supply you with a test script in <tt>main/test-mr.sh</tt>. The tests
+check that the <tt>wc</tt> and <tt>indexer</tt> MapReduce applications
+produce the correct output when given the <tt>pg-xxx.txt</tt> files as
+input. The tests also check that your implementation runs the Map and
+Reduce tasks in parallel, and that your implementation recovers from
+workers that crash while running tasks.
+
+</p><p>
+If you run the test script now, it will hang because the coordinator never finishes:
+</p>
+
+<pre>$ cd ~/6.5840/src/main
+$ bash test-mr.sh
+*** Starting wc test.
+</pre>
+
+<p>
+You can change <tt>ret := false</tt> to true in the Done function in <tt>mr/coordinator.go</tt>
+so that the coordinator exits immediately. Then:
+</p>
+
+<pre>$ bash test-mr.sh
+*** Starting wc test.
+sort: No such file or directory
+cmp: EOF on mr-wc-all
+--- wc output is not the same as mr-correct-wc.txt
+--- wc test: FAIL
+$
+</pre>
+
+<p>
+The test script expects to see output in files named <tt>mr-out-X</tt>, one
+for each reduce task. The empty implementations of <tt>mr/coordinator.go</tt>
+and <tt>mr/worker.go</tt> don't produce those files (or do much of
+anything else), so the test fails.
+
+</p><p>
+When you've finished, the test script output should look like this:
+
+</p><pre>$ bash test-mr.sh
+*** Starting wc test.
+--- wc test: PASS
+*** Starting indexer test.
+--- indexer test: PASS
+*** Starting map parallelism test.
+--- map parallelism test: PASS
+*** Starting reduce parallelism test.
+--- reduce parallelism test: PASS
+*** Starting job count test.
+--- job count test: PASS
+*** Starting early exit test.
+--- early exit test: PASS
+*** Starting crash test.
+--- crash test: PASS
+*** PASSED ALL TESTS
+$
+</pre>
+
+<p>
+You may see some errors from the Go RPC package that look like
+</p><pre>2019/12/16 13:27:09 rpc.Register: method "Done" has 1 input parameters; needs exactly three
+</pre>
+Ignore these messages; registering the coordinator as an <a href="https://golang.org/src/net/rpc/server.go">RPC server</a> checks if all its 
+methods are suitable for RPCs (have 3 inputs); we know that <tt>Done</tt> is not called via RPC.
+
+<p>
+Additionally, depending on your strategy for terminating worker processes, you may see some errors of the form
+</p><pre>2025/02/11 16:21:32 dialing:dial unix /var/tmp/5840-mr-501: connect: connection refused
+</pre>
+It is fine to see a handful of these messages per test; they arise when the worker is unable to contact the coordinator RPC server after
+the coordinator has exited.
+
+<p>
+</p><h3>A few rules:</h3>
+
+<ul>
+
+<li>
+The map phase should divide the intermediate keys into buckets for
+<tt>nReduce</tt> reduce tasks,
+where <tt>nReduce</tt> is the number of reduce tasks -- the argument that
+<tt>main/mrcoordinator.go</tt> passes to <tt>MakeCoordinator()</tt>.
+Each mapper should create <tt>nReduce</tt> intermediate files for
+consumption by the reduce tasks.
+
+</li><li> The worker implementation should put the output of the X'th
+reduce task in the file <tt>mr-out-X</tt>.
+
+</li><li> A <tt>mr-out-X</tt> file should contain one line per Reduce
+function output. The line should be generated with the Go <tt>"%v %v"</tt>
+format, called with the key and value. Have a look in <tt>main/mrsequential.go</tt>
+for the line commented "this is the correct format".
+The test script will fail if your implementation deviates too much from this format.
+
+</li><li> You can modify <tt>mr/worker.go</tt>, <tt>mr/coordinator.go</tt>, and <tt>mr/rpc.go</tt>.
+You can temporarily modify other files for testing, but make sure your code works
+with the original versions; we'll test with the original versions.
+
+</li><li> The worker should put intermediate Map output in files in the current
+directory, where your worker can later read them as input to Reduce tasks.
+
+</li><li> <tt>main/mrcoordinator.go</tt> expects <tt>mr/coordinator.go</tt> to implement a
+<tt>Done()</tt> method that returns true when the MapReduce job is completely finished;
+at that point, <tt>mrcoordinator.go</tt> will exit.
+
+</li><li> When the job is completely finished, the worker processes should exit.
+A simple way to implement this is to use the return value from <tt>call()</tt>:
+if the worker fails to contact the coordinator, it can assume that the coordinator has exited
+because the job is done, so the worker can terminate too. Depending on your
+design, you might also find it helpful to have a "please exit" pseudo-task
+that the coordinator can give to workers.
+
+</li></ul>
+
+<h3>Hints</h3>
+
+<ul>
+
+<li>The <a href="https://pdos.csail.mit.edu/6.824/labs/guidance.html">Guidance page</a> has some 
+  tips on developing and debugging.
+
+</li><li> One way to get started is to modify <tt>mr/worker.go</tt>'s
+<tt>Worker()</tt> to send an RPC to the coordinator asking for a task. Then
+modify the coordinator to respond with the file name of an as-yet-unstarted
+map task. Then modify the worker to read that file and call the
+application Map function, as in <tt>mrsequential.go</tt>.
+
+</li><li> The application Map and Reduce functions are loaded at run-time
+using the Go plugin package, from files whose names end in <tt>.so</tt>.
+
+</li><li> If you change anything in the <tt>mr/</tt> directory, you will
+probably have to re-build any MapReduce plugins you use, with
+something like <tt>go build -buildmode=plugin ../mrapps/wc.go</tt>
+
+</li><li> This lab relies on the workers sharing a file system.
+That's straightforward when all workers run on the same machine, but would require a global
+filesystem like GFS if the workers ran on different machines.
+
+</li><li> A reasonable naming convention for intermediate files is <tt>mr-X-Y</tt>,
+where X is the Map task number, and Y is the reduce task number.
+
+</li><li> The worker's map task code will need a way to store intermediate
+key/value pairs in files in a way that can be correctly read back
+during reduce tasks. One possibility is to use Go's <tt>encoding/json</tt> package. To
+write key/value pairs in JSON format to an open file:
+<pre>  enc := json.NewEncoder(file)
+  for _, kv := ... {
+    err := enc.Encode(&amp;kv)
+</pre>
+and to read such a file back:
+<pre>  dec := json.NewDecoder(file)
+  for {
+    var kv KeyValue
+    if err := dec.Decode(&amp;kv); err != nil {
+      break
+    }
+    kva = append(kva, kv)
+  }
+</pre>
+
+</li><li> The map part of your worker can use the <tt>ihash(key)</tt> function
+(in <tt>worker.go</tt>) to pick the reduce task for a given key.
+
+</li><li> You can steal some code from <tt>mrsequential.go</tt> for reading
+Map input files, for sorting intermedate key/value pairs between the
+Map and Reduce, and for storing Reduce output in files.
+
+</li><li> The coordinator, as an RPC server, will be concurrent; don't forget
+to lock shared data.
+
+</li><li> Use Go's race detector, with <tt>go run -race</tt>.
+<tt>test-mr.sh</tt> has a comment at the start that tells you
+how to run it with <tt>-race</tt>.
+When we grade your labs, we will <b>not</b> use the
+race detector. Nevertheless, if your code has races, there's
+a good chance it will fail when we test it even without
+the race detector.
+
+</li><li> Workers will sometimes need to wait, e.g. reduces can't start
+until the last map has finished. One possibility is for workers to
+periodically ask the coordinator for work, sleeping
+with <tt>time.Sleep()</tt> between each request. Another possibility
+is for the relevant RPC handler in the coordinator to have a loop that
+waits, either with <tt>time.Sleep()</tt> or <tt>sync.Cond</tt>. Go
+runs the handler for each RPC in its own thread, so the fact that one
+handler is waiting needn't prevent the coordinator from processing other
+RPCs.
+
+</li><li> The coordinator can't reliably distinguish between crashed workers,
+workers that are alive but have stalled for some reason,
+and workers that are executing but too slowly to be useful.
+The best you can do is have the coordinator wait for
+some amount of time, and then give up and re-issue the task to
+a different worker. For this lab, have the coordinator wait for
+ten seconds; after that the coordinator should assume the worker has
+died (of course, it might not have).
+
+</li><li> If you choose to implement Backup Tasks (Section 3.6), note that we test that your code doesn't
+    schedule extraneous tasks when workers execute tasks without crashing.  Backup tasks should only
+    be scheduled after some relatively long period of time (e.g., 10s).
+
+</li><li> To test crash recovery, you can use the <tt>mrapps/crash.go</tt>
+application plugin. It randomly exits in the Map and Reduce functions.
+
+</li><li> To ensure that nobody observes partially written files in the presence of
+    crashes, the MapReduce paper mentions the trick of using a temporary file
+    and atomically renaming it once it is completely written. You can use
+    <tt>ioutil.TempFile</tt> (or <tt>os.CreateTemp</tt> if you are running
+    Go 1.17 or later) to create a temporary file and <tt>os.Rename</tt>
+    to atomically rename it.
+
+</li><li> <tt>test-mr.sh</tt> runs all its processes in the sub-directory <tt>mr-tmp</tt>, so if
+    something goes wrong and you want to look at intermediate or output files, look there. Feel free to
+    temporarily modify <tt>test-mr.sh</tt> to <tt>exit</tt> after the failing test, so the script does not
+    continue testing (and overwrite the output files).
+
+</li><li> <tt>test-mr-many.sh</tt> runs <tt>test-mr.sh</tt> many times in a row,
+    which you may want to do in order to spot low-probability bugs.
+    It takes as an argument the number of times to run
+    the tests. You should not run several <tt>test-mr.sh</tt> instances in parallel because the
+    coordinator will reuse the same socket, causing conflicts.
+
+</li><li>Go RPC sends only struct fields whose names start with capital letters.
+  Sub-structures must also have capitalized field names.
+
+</li><li> When calling the RPC <tt>call()</tt> function, the
+reply struct should contain all default values. RPC calls
+should look like this:
+<pre>  reply := SomeType{}
+  call(..., &amp;reply)
+</pre>
+without setting any fields of reply before the call. If you
+pass reply structures that have non-default fields, the RPC
+system may silently return incorrect values.
+
+</li></ul>
+
+<h3>No-credit challenge exercises</h3>
+
+<p class="challenge">
+Implement your own MapReduce application (see examples in <tt>mrapps/*</tt>), e.g., Distributed
+Grep (Section 2.3 of the MapReduce paper).
+
+</p><p class="challenge">
+Get your MapReduce coordinator and workers to run on separate machines, as they would in practice.
+You will need to set up your RPCs to communicate over TCP/IP instead of Unix sockets (see
+the commented out line in <tt>Coordinator.server()</tt>), and read/write files using a shared file
+system. For example, you can <tt>ssh</tt> into multiple 
+<a href="http://kb.mit.edu/confluence/display/istcontrib/Getting+Started+with+Athena">Athena cluster</a>
+machines at MIT, which use 
+<a href="http://kb.mit.edu/confluence/display/istcontrib/AFS+at+MIT+-+An+Introduction">AFS</a>
+to share files; or you could rent a couple AWS instances and use 
+<a href="https://aws.amazon.com/s3/">S3</a> for storage.
+
+
+
+
+
+
+
+</p><div id="videoPopupMenu"></div></body><div style="all: initial;"><div id="__hcfy__" style="all: initial;"><template shadowrootmode="open"><style>#root{-webkit-text-size-adjust:100%;box-sizing:border-box;font-size:14px;font-weight:400;letter-spacing:0;line-height:1.28581;text-transform:none;color:#182026;font-family:-apple-system,"BlinkMacSystemFont","Segoe UI","Roboto","Oxygen","Ubuntu","Cantarell","Open Sans","Helvetica Neue","Icons16",sans-serif;touch-action:manipulation}#root>.bp5-portal{z-index:9999999999}</style><link rel="stylesheet" href="chrome-extension://oikmahiipjniocckomdccmplodldodja/normalize.css"><link rel="stylesheet" href="chrome-extension://oikmahiipjniocckomdccmplodldodja/blueprint.css"><link rel="stylesheet" href="chrome-extension://oikmahiipjniocckomdccmplodldodja/blueprint-select.css"><link rel="stylesheet" href="chrome-extension://oikmahiipjniocckomdccmplodldodja/cropper.css"><style>#translate-panel{background-color:#f6f7f9;display:flex;flex-direction:column;padding-bottom:8px}.bp5-dark #translate-panel{background-color:#1c2127}#translate-panel .fixed{flex-shrink:0;margin-bottom:10px}#translate-panel .body{flex-grow:1;overflow:auto;overscroll-behavior:contain}#translate-panel .body::-webkit-scrollbar{width:8px;background-color:rgba(0,0,0,0);-webkit-border-radius:100px}#translate-panel .body::-webkit-scrollbar:hover{background-color:rgba(0,0,0,.09)}#translate-panel .body::-webkit-scrollbar-thumb:vertical{background:rgba(0,0,0,.5);-webkit-border-radius:100px}#translate-panel .body::-webkit-scrollbar-thumb:vertical:active{background:rgba(0,0,0,.61);-webkit-border-radius:100px}#translate-panel.size-small,#translate-panel.size-small h6.bp5-heading,#translate-panel.size-small .bp5-control.bp5-large,#translate-panel.size-small textarea.bp5-input.bp5-small{font-size:14px}#translate-panel.size-small .phonetic-item,#translate-panel.size-small .quick-settings a{font-size:12px}#translate-panel.size-middle,#translate-panel.size-middle h6.bp5-heading,#translate-panel.size-middle .bp5-control.bp5-large,#translate-panel.size-middle textarea.bp5-input{font-size:18px}#translate-panel.size-middle .phonetic-item,#translate-panel.size-middle .quick-settings a{font-size:14px}#translate-panel.size-large,#translate-panel.size-large h6.bp5-heading,#translate-panel.size-large .bp5-control.bp5-large,#translate-panel.size-large textarea.bp5-input.bp5-large{font-size:22px}#translate-panel.size-large .source,#translate-panel.size-large .phonetic-item,#translate-panel.size-large .quick-settings a{font-size:18px}#translate-panel .bp5-button.bp5-small,#translate-panel .bp5-small .bp5-button{min-height:20px;min-width:20px}#translate-panel .header{display:flex;align-items:center;padding:4px 6px 4px 10px;border-bottom:1px solid #d1d1d1}.bp5-dark #translate-panel .header{border-bottom-color:rgba(17,20,24,.4)}#translate-panel .header .drag-block{min-width:5px;flex-shrink:0;flex-grow:1;align-self:stretch}#translate-panel .header .left{flex-shrink:0;display:flex}#translate-panel .header .right{flex-shrink:0;display:flex;align-items:center}#translate-panel .header .right .bp5-icon-arrow-right{flex-shrink:0;margin:0 5px}#translate-panel .header .right>.bp5-button{flex-shrink:0;margin:0 1px}#translate-panel .header .right>.bp5-button:last-child{margin-right:0}#translate-panel .quick-settings{padding:4px 9px;margin:0 1px}#translate-panel .quick-settings>div{margin-bottom:5px}#translate-panel .quick-settings .bp5-control{margin-bottom:0}#translate-panel .query-text{position:relative;padding:10px 10px 2px 10px}#translate-panel .query-text textarea.bp5-input{min-height:44px;font-family:system-ui,-apple-system,"Segoe UI","Roboto","Ubuntu","Cantarell","Noto Sans",sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";overscroll-behavior:contain}#translate-panel .query-text .translate-btn{position:absolute;opacity:.6}#translate-panel .query-text .translate-btn:hover{opacity:1}#translate-panel .body{padding:0 10px}#translate-panel .body .bp5-card:first-child{margin-top:1px}#translate-panel .body .bp5-card:last-child{margin-bottom:1px}#translate-panel .body .no-api{margin:20px 0}.result-block{margin:8px 0;padding:2px 5px}.result-block .bp5-button{visibility:hidden}.result-block .error .bp5-button,.result-block:hover .bp5-button{visibility:visible}.result-block .legend{display:flex;align-items:center;justify-content:space-between}.result-block .legend .legend-left{display:flex;align-items:center}.result-block .legend .api-ico,.result-block .legend .bp5-heading{flex-shrink:0;white-space:nowrap}.result-block .legend .api-ico{display:inline-block;width:14px;height:14px;background-size:contain;margin-right:3px}.result-block .legend .bp5-heading{margin-bottom:0;margin-right:10px}.result-block .legend .source{cursor:pointer;font-size:12px;display:inline-flex;align-items:center}.result-block .legend .source .source-text{overflow:hidden}.result-block .legend .source .bp5-icon{position:relative;top:-1px;margin-left:1px}.result-block .phonetic{display:flex;flex-wrap:wrap}.result-block .phonetic .phonetic-item{display:flex;align-items:center;font-size:12px}.result-block .phonetic .phonetic-item:not(:last-child){margin-right:12px}.result-block .common-result p{line-height:1.3;margin:2px 0;overflow-wrap:break-word}.result-block .common-result .dict a{text-decoration:underline}.result-block .error{font-size:12px;padding:5px 10px}.result-block .dict-pos{margin-right:5px}.external-translators{margin-bottom:3px;padding:0;display:flex;flex-wrap:wrap}.external-translators>div{margin:0 5px 5px 0}.quick-links a{margin:0 5px 5px 0}#popper-container{width:250px;max-width:100%;position:absolute;left:0;top:0;z-index:9999999998;touch-action:none;transition:opacity .2s;background-color:#f6f7f9}.bp5-dark #popper-container{background-color:#1c2127}#popper-container.show{opacity:1;pointer-events:auto;user-select:auto}#popper-container,#popper-container[data-popper-reference-hidden=true]{opacity:0;pointer-events:none;user-select:none}#popper-container .drag-block{cursor:grab}#popper-container.pin{position:fixed}#popper-container.pin .arrow{display:none}#popper-container .arrow,#popper-container .arrow::before{position:absolute;width:8px;height:8px;z-index:-1}#popper-container .arrow::before{content:"";transform:rotate(45deg);background:#f6f7f9}.bp5-dark #popper-container .arrow::before{background-color:#1c2127}#popper-container .arrow{display:none}#popper-container.show[data-popper-placement]:not([data-popper-reference-hidden=true]) .arrow{display:block}#popper-container[data-popper-placement^=top] .arrow{bottom:-5px}#popper-container[data-popper-placement^=top] .arrow::before{border-right:1px solid #d1d1d1;border-bottom:1px solid #d1d1d1}#popper-container[data-popper-placement^=bottom] .arrow{top:-5px}#popper-container[data-popper-placement^=bottom] .arrow::before{border-left:1px solid #d1d1d1;border-top:1px solid #d1d1d1}#popper-container[data-popper-placement^=left] .arrow{right:-5px}#popper-container[data-popper-placement^=left] .arrow::before{border-right:1px solid #d1d1d1;border-top:1px solid #d1d1d1}#popper-container[data-popper-placement^=right] .arrow{left:-5px}#popper-container[data-popper-placement^=right] .arrow::before{border-left:1px solid #d1d1d1;border-bottom:1px solid #d1d1d1}#translate-btn{display:none;position:absolute;z-index:9999999999;left:0;top:0}#translate-btn .bp5-button{padding:2px;min-width:0;min-height:0}#translate-btn .btn-icon{width:18px;height:18px;background-image:url(chrome-extension://oikmahiipjniocckomdccmplodldodja/logo.png);background-size:contain}.bp5-dark #translate-btn .btn-icon{background-image:url(chrome-extension://oikmahiipjniocckomdccmplodldodja/logowhite36.png)}#translate-btn.show{display:block}.translate-type-selector .bp5-label{display:inline}.translate-type-selector .bp5-radio{margin-bottom:0}#ocr-container{position:fixed;z-index:99999999999999;left:0;top:0;right:0;bottom:0}#ocr-container .toolbar{display:none;position:absolute;z-index:1}#ocr-container img{max-width:100%}#app{cursor:default}.switch-pin{flex-shrink:0;cursor:pointer}.switch-pin .bp5-icon-pin{transition:transform .2s,color .2s;transform:rotate(-45deg)}.pin .switch-pin .bp5-icon-pin{transform:rotate(-70deg)}.cut-btn{margin-left:2px}.app-toaster-container{position:fixed !important;z-index:9999999999 !important}.app-toaster-container .bp5-toast{min-width:auto}#web-trs-panel .app-toaster-container{padding-right:0;padding-left:0}#web-trs-panel .page-trs-form-group{margin:0 0 0 0;align-items:center}#web-trs-panel .page-trs-form-group>label{width:70px}</style><div id="root" dir="ltr"><div id="app"><div id="translate-btn"><button type="button" class="bp5-button"><span class="btn-icon"></span></button></div><div id="popper-container" class="bp5-elevation-4" style="width: 290px; transform: translate(0px, 0px);"><div id="translate-panel" class="size-small"><div class="fixed"><div class="header"><div class="left"><div class="switch-pin"><button type="button" class="bp5-button bp5-minimal bp5-small"><span aria-hidden="true" class="bp5-icon bp5-icon-pin"><svg data-icon="pin" height="14" role="img" viewBox="0 0 16 16" width="14"><path d="M9.41.92c-.51.51-.41 1.5.15 2.56L4.34 7.54C2.8 6.48 1.45 6.05.92 6.58l3.54 3.54-3.54 4.95 4.95-3.54 3.54 3.54c.53-.53.1-1.88-.96-3.42l4.06-5.22c1.06.56 2.04.66 2.55.15L9.41.92z" fill-rule="evenodd"></path></svg></span></button></div><button type="button" title="&#22270;&#29255;&#32763;&#35793;" class="bp5-button bp5-minimal bp5-small"><span aria-hidden="true" class="bp5-icon bp5-icon-media"><svg data-icon="media" height="14" role="img" viewBox="0 0 16 16" width="14"><path d="M11.99 6.99c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm3-5h-14c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h14c.55 0 1-.45 1-1v-10c0-.55-.45-1-1-1zm-1 9l-5-3-1 2-3-4-3 5v-7h12v7z" fill-rule="evenodd"></path></svg></span></button><button type="button" title="&#35821;&#38899;&#32763;&#35793;" class="bp5-button bp5-minimal bp5-small"><span class="bp5-icon"><svg version="1.1" id="Capa_1" width="14" height="14" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" viewBox="0 0 490.9 490.9" xml:space="preserve"><g><g><path d="M245.5,322.9c53,0,96.2-43.2,96.2-96.2V96.2c0-53-43.2-96.2-96.2-96.2s-96.2,43.2-96.2,96.2v130.5 C149.3,279.8,192.5,322.9,245.5,322.9z M173.8,96.2c0-39.5,32.2-71.7,71.7-71.7s71.7,32.2,71.7,71.7v130.5 c0,39.5-32.2,71.7-71.7,71.7s-71.7-32.2-71.7-71.7V96.2z"></path><path d="M94.4,214.5c-6.8,0-12.3,5.5-12.3,12.3c0,85.9,66.7,156.6,151.1,162.8v76.7h-63.9c-6.8,0-12.3,5.5-12.3,12.3 s5.5,12.3,12.3,12.3h152.3c6.8,0,12.3-5.5,12.3-12.3s-5.5-12.3-12.3-12.3h-63.9v-76.7c84.4-6.3,151.1-76.9,151.1-162.8 c0-6.8-5.5-12.3-12.3-12.3s-12.3,5.5-12.3,12.3c0,76.6-62.3,138.9-138.9,138.9s-138.9-62.3-138.9-138.9 C106.6,220,101.2,214.5,94.4,214.5z"></path></g></g></svg></span></button></div><div class="drag-block" title="&#25353;&#20303;&#19981;&#25918;&#21487;&#20197;&#25302;&#21160;"></div><div class="right"><button type="button" disabled="" title="&#28155;&#21152;&#21040;&#25910;&#34255;&#22841;" tabindex="-1" class="bp5-button bp5-disabled bp5-minimal bp5-small"><span aria-hidden="true" class="bp5-icon bp5-icon-star-empty"><svg data-icon="star-empty" height="14" role="img" viewBox="0 0 16 16" width="14"><path d="M16 6.11l-5.53-.84L8 0 5.53 5.27 0 6.11l4 4.1L3.06 16 8 13.27 12.94 16 12 10.21l4-4.1zM4.91 13.2l.59-3.62L3 7.02l3.45-.53L8 3.2l1.55 3.29 3.45.53-2.5 2.56.59 3.62L8 11.49 4.91 13.2z" fill-rule="evenodd"></path></svg></span></button><span class="bp5-popover-target"><button type="button" class="bp5-button bp5-minimal bp5-small settings" title="&#24555;&#25463;&#35774;&#32622;" aria-expanded="false" aria-haspopup="menu"><span aria-hidden="true" class="bp5-icon bp5-icon-cog"><svg data-icon="cog" height="14" role="img" viewBox="0 0 16 16" width="14"><path d="M15.19 6.39h-1.85c-.11-.37-.27-.71-.45-1.04l1.36-1.36c.31-.31.31-.82 0-1.13l-1.13-1.13a.803.803 0 00-1.13 0l-1.36 1.36c-.33-.17-.67-.33-1.04-.44V.79c0-.44-.36-.8-.8-.8h-1.6c-.44 0-.8.36-.8.8v1.86c-.39.12-.75.28-1.1.47l-1.3-1.3c-.3-.3-.79-.3-1.09 0L1.82 2.91c-.3.3-.3.79 0 1.09l1.3 1.3c-.2.34-.36.7-.48 1.09H.79c-.44 0-.8.36-.8.8v1.6c0 .44.36.8.8.8h1.85c.11.37.27.71.45 1.04l-1.36 1.36c-.31.31-.31.82 0 1.13l1.13 1.13c.31.31.82.31 1.13 0l1.36-1.36c.33.18.67.33 1.04.44v1.86c0 .44.36.8.8.8h1.6c.44 0 .8-.36.8-.8v-1.86c.39-.12.75-.28 1.1-.47l1.3 1.3c.3.3.79.3 1.09 0l1.09-1.09c.3-.3.3-.79 0-1.09l-1.3-1.3c.19-.35.36-.71.48-1.1h1.85c.44 0 .8-.36.8-.8v-1.6a.816.816 0 00-.81-.79zm-7.2 4.6c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3z" fill-rule="evenodd"></path></svg></span></button></span><button type="button" title="&#20851;&#38381;(Esc)" class="bp5-button bp5-minimal bp5-small"><span aria-hidden="true" class="bp5-icon bp5-icon-cross"><svg data-icon="cross" height="18" role="img" viewBox="0 0 16 16" width="18"><path d="M9.41 8l3.29-3.29c.19-.18.3-.43.3-.71a1.003 1.003 0 00-1.71-.71L8 6.59l-3.29-3.3a1.003 1.003 0 00-1.42 1.42L6.59 8 3.3 11.29c-.19.18-.3.43-.3.71a1.003 1.003 0 001.71.71L8 9.41l3.29 3.29c.18.19.43.3.71.3a1.003 1.003 0 00.71-1.71L9.41 8z" fill-rule="evenodd"></path></svg></span></button></div></div><div class="bp5-collapse"><div class="bp5-collapse-body" aria-hidden="true"><div class="quick-settings bp5-card bp5-elevation-0"><div><span aria-controls="listbox-0" class="lang-select bp5-popover-target" aria-expanded="false" aria-haspopup="listbox" role="combobox"><button type="button" class="bp5-button bp5-small"><span class="bp5-button-text">&#33258;&#21160;&#26816;&#27979;</span><span aria-hidden="true" class="bp5-icon bp5-icon-caret-down"><svg data-icon="caret-down" height="16" role="img" viewBox="0 0 16 16" width="16"><path d="M12 6.5c0-.28-.22-.5-.5-.5h-7a.495.495 0 00-.37.83l3.5 4c.09.1.22.17.37.17s.28-.07.37-.17l3.5-4c.08-.09.13-.2.13-.33z" fill-rule="evenodd"></path></svg></span></button></span><span aria-hidden="true" class="bp5-icon bp5-icon-arrow-right" style="margin: 0px 10px;"><svg data-icon="arrow-right" height="12" role="img" viewBox="0 0 16 16" width="12"><path d="M14.7 7.29l-5-5a.965.965 0 00-.71-.3 1.003 1.003 0 00-.71 1.71l3.29 3.29H1.99c-.55 0-1 .45-1 1s.45 1 1 1h9.59l-3.29 3.29a1.003 1.003 0 001.42 1.42l5-5c.18-.18.29-.43.29-.71s-.12-.52-.3-.7z" fill-rule="evenodd"></path></svg></span><span aria-controls="listbox-1" class="lang-select bp5-popover-target" aria-expanded="false" aria-haspopup="listbox" role="combobox"><button type="button" class="bp5-button bp5-small"><span class="bp5-button-text">&#20013;&#25991;(&#31616;&#20307;)</span><span aria-hidden="true" class="bp5-icon bp5-icon-caret-down"><svg data-icon="caret-down" height="16" role="img" viewBox="0 0 16 16" width="16"><path d="M12 6.5c0-.28-.22-.5-.5-.5h-7a.495.495 0 00-.37.83l3.5 4c.09.1.22.17.37.17s.28-.07.37-.17l3.5-4c.08-.09.13-.2.13-.33z" fill-rule="evenodd"></path></svg></span></button></span></div><div><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox" checked=""><span class="bp5-control-indicator"></span>&#35895;&#27468;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox" checked=""><span class="bp5-control-indicator"></span>DeepL(&#20869;&#32622;)</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>DeepL</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>ChatGPT</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>Claude</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>Gemini</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#30789;&#22522;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#28151;&#20803;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#25991;&#24515;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#26234;&#35889;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#35910;&#21253;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#36890;&#20041;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>DeepSeek</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#38646;&#19968;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>MiniMax</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#30334;&#24029;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>Kimi</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#30334;&#24230;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#30334;&#24230;(&#19987;&#19994;&#29256;)</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#33150;&#35759;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#24425;&#20113;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#38463;&#37324;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#38463;&#37324;(&#19987;&#19994;&#29256;)</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#26377;&#36947;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#28779;&#23665;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox" checked=""><span class="bp5-control-indicator"></span>&#24517;&#24212;&#35789;&#20856;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#25628;&#29399;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox" checked=""><span class="bp5-control-indicator"></span>Yandex</label><div style="margin-top: 4px;"><a class="bp5-text-small">&#36141;&#20080;&#22871;&#39184;&#21253;&#21518;&#21487;&#30452;&#25509;&#20351;&#29992;&#20197;&#19978;&#25152;&#26377;&#26381;&#21153;</a></div></div><div><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#33258;&#21160;&#26391;&#35835;</label><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#33258;&#21160;&#22797;&#21046;</label></div><div role="radiogroup" class="bp5-radio-group"><label class="bp5-control bp5-radio bp5-inline"><input name="Blueprint5.RadioGroup-0" type="radio" value="small" checked=""><span class="bp5-control-indicator"></span>&#23567;</label><label class="bp5-control bp5-radio bp5-inline"><input name="Blueprint5.RadioGroup-0" type="radio" value="middle"><span class="bp5-control-indicator"></span>&#20013;</label><label class="bp5-control bp5-radio bp5-inline"><input name="Blueprint5.RadioGroup-0" type="radio" value="large"><span class="bp5-control-indicator"></span>&#22823;</label></div><div><label class="bp5-control bp5-checkbox bp5-inline"><input type="checkbox"><span class="bp5-control-indicator"></span>&#26174;&#31034;&#25991;&#26412;&#26694;</label><label class="bp5-control bp5-checkbox bp5-inline" style="margin-right: 0px;"><input type="checkbox"><span class="bp5-control-indicator"></span>&#40736;&#26631;&#24748;&#28014;&#21462;&#35789;</label></div><a class="bp5-text-small">&#25171;&#24320;&#23436;&#25972;&#35774;&#32622;</a></div></div></div></div><div class="body"><p>&#35831;&#36755;&#20837;&#38656;&#35201;&#32763;&#35793;&#30340;&#25991;&#26412;&#12290;</p></div></div><div class="arrow"></div></div><div id="web-trs-panel"></div></div></div></template></div></div></html>

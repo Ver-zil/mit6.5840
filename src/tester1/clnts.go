@@ -43,6 +43,7 @@ func (clnt *Clnt) allowedL(server string) bool {
 	return false
 }
 
+// 根据server name将通讯end注册到ends里，如果ends里有则返回直接进行通讯
 func (clnt *Clnt) makeEnd(server string) end {
 	clnt.mu.Lock()
 	defer clnt.mu.Unlock()
