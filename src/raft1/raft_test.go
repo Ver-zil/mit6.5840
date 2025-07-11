@@ -141,11 +141,13 @@ func TestBasicAgree3B(t *testing.T) {
 
 	iters := 3
 	for index := 1; index < iters+1; index++ {
+		// 日志提交的idx从1开始算，0号位可以看成一个dummy节点
 		nd, _ := ts.nCommitted(index)
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
 		}
 
+		// 要求日志被所有节点2s内接收且apply
 		xindex := ts.one(index*100, servers, false)
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
@@ -169,6 +171,7 @@ func TestRPCBytes3B(t *testing.T) {
 	iters := 10
 	var sent int64 = 0
 	for index := 2; index < iters+2; index++ {
+		// cmd为5k长度的随机字符串
 		cmd := tester.Randstring(5000)
 		xindex := ts.one(cmd, servers, false)
 		if xindex != index {
@@ -180,6 +183,7 @@ func TestRPCBytes3B(t *testing.T) {
 	bytes1 := ts.BytesTotal()
 	got := bytes1 - bytes0
 	expected := int64(servers) * sent
+	// 要求rpc调用传输不能太多，每一轮最多多发一次rpc
 	if got > expected+50000 {
 		t.Fatalf("too many RPC bytes; got %v, expected %v", got, expected)
 	}
@@ -214,6 +218,7 @@ func TestFollowerFailure3B(t *testing.T) {
 	ts.g.DisconnectAll((leader2 + 2) % servers)
 	tester.AnnotateConnection(ts.g.GetConnected())
 
+	// 要求cmd在没有follower能被leader正常追加但是无法提交
 	// submit a command.
 	index, _, ok := ts.srvs[leader2].Raft().Start(104)
 	if ok != true {
@@ -270,6 +275,7 @@ func TestLeaderFailure3B(t *testing.T) {
 // test that a follower participates after
 // disconnect and re-connect.
 func TestFailAgree3B(t *testing.T) {
+	// 当有一个节点断开后又重连了，需要能和主流节点日志同步起来
 	servers := 3
 	ts := makeTest(t, servers, true, false)
 	defer ts.cleanup()
@@ -305,6 +311,7 @@ func TestFailAgree3B(t *testing.T) {
 }
 
 func TestFailNoAgree3B(t *testing.T) {
+	// 要求当大部分节点失联，log不应该被应用，当这些节点恢复的时候，前面失联的log也应该被一起应用
 	servers := 5
 	ts := makeTest(t, servers, true, false)
 	defer ts.cleanup()

@@ -10,6 +10,7 @@ import (
 	//	"bytes"
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,6 +90,8 @@ type Raft struct {
 	electionTimer  *time.Timer           // 选举用的
 	heartBeatTimer *time.Timer           // leader定时给其他节点发送心跳用的
 	applyChan      chan raftapi.ApplyMsg // 给外部将已commit日志进行apply的
+	replicatorCond []*sync.Cond          // 用来唤醒同步日志的底层机制
+	applyChanCond  *sync.Cond            // 用于进行commit和apply的逻辑
 }
 
 // return currentTerm and whether this server
@@ -185,8 +188,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer func() {
-		DPrintf("当前节点%v:节点%v请求选举结果%v", rf.me, args.CandidateId, reply.VoteGranted)
-		tester.Annotate("election",
+		// DPrintf("当前节点%v:节点%v请求选举结果%v", rf.me, args.CandidateId, reply.VoteGranted)
+		Record("election",
 			fmt.Sprintf("当前节点%v,节点%v请求选举结果%v", rf.me, args.CandidateId, reply.VoteGranted),
 			fmt.Sprintf("当前节点:node(%v),term(%v) 请求节点:node(%v),term(%v) 选举结果%v", rf.me, rf.currentTerm, args.CandidateId, args.Term, reply.VoteGranted))
 
@@ -205,7 +208,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm, rf.votedFor = args.Term, -1
 		rf.stateTransform(follower)
 	}
-
 
 	if !rf.isUpToDateLog(args.LastLogIdx, args.LastLogTerm) {
 		// 当前的logIdx和lastLogTerm不是最新的
@@ -259,24 +261,44 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 type AppendEntriesArgs struct {
-	Term       int        // 当前的term
-	LeadId     int        // leader id
-	PrevLogIdx int        // 最后一个log的idx
-	PreLogTerm int        // 最后一个log的term
-	Entries    []LogEntry // 发送给follower的entry
-	LeadCommit int        // leader的commitIdx
+	Term         int        // 当前的term
+	LeaderId     int        // leader id
+	PrevLogIdx   int        // 最后一个log的idx
+	PreLogTerm   int        // 最后一个log的term
+	Entries      []LogEntry // 发送给follower的entry
+	LeaderCommit int        // leader的commitIdx
 }
 
 type AppendEntriesReply struct {
-	Term    int  // follower的term，如果leader和follower之间对不上，从旧leader变成follower
-	Success bool // 是否可以添加成功
+	Term         int  // follower的term，如果leader和follower之间对不上，从旧leader变成follower
+	Success      bool // 是否可以添加成功
+	ConflictIdx  int  // 日志冲突点
+	ConflictTerm int  // 日志冲突点的Term
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// follower处理append请求，涉及到追加日志之类的写请求，直接加写锁
 	rf.mu.Lock()
+	defer func() {
+		if args.Term >= rf.currentTerm {
+			if !reply.Success {
+				// 日志复制失败
+				Record(fmt.Sprintf(NodeTag, rf.me), AEConflictDesc,
+					fmt.Sprintf("AE Conflict:当前节点:%v 当前leader:%v 冲突点%v 重定位点[idx:%v, term:%v]", rf.me, args.LeaderId, args.PrevLogIdx, reply.ConflictIdx, reply.ConflictTerm))
+			} else if len(args.Entries) > 0 {
+				// commit信息补充
+				Record(fmt.Sprintf(NodeTag, rf.me), AEAccessDesc,
+					fmt.Sprintf("AE Access:当前节点%v 当前leader:%v 提交点%v 日志长度%v", rf.me, args.LeaderId, rf.commitIdx, len(rf.log)-1))
+			}
+		}
+	}()
 	defer rf.mu.Unlock()
 
+	if args.Term < rf.currentTerm {
+		// 老leader的请求不做任何处理
+		reply.Term, reply.Success = rf.currentTerm, false
+		return
+	}
 	// 先简单的做选举的逻辑
 	// 对于选举这个问题来说，第一个需要处理的就是当args.term比自己大的时候，不论是否为leader，都应该将自己变成follower
 	// 如果是
@@ -285,7 +307,42 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.stateTransform(follower)
 	}
 	rf.electionTimer.Reset(GetRandomElectionTimeout())
-	DPrintf("节点%v接收心跳并重置计时器", rf.me)
+	// DPrintf("节点%v接收心跳并重置计时器", rf.me)
+
+	// 进行日志追加逻辑
+	// 1.follower日志只落后leader，但是无冲突
+	// 2.follower和leader日志冲突，需要进行覆盖问题
+
+	// args.preLogIdx比当前log长度长 或者 preLogIdx点上两者的term不一致，则返回false
+	if curLogLastIdx := len(rf.log) - 1; curLogLastIdx < args.PrevLogIdx || rf.log[args.PrevLogIdx].Term != args.PreLogTerm {
+		if curLogLastIdx < args.PrevLogIdx {
+			reply.ConflictIdx, reply.ConflictTerm = curLogLastIdx, rf.log[curLogLastIdx].Term
+		} else if rf.log[args.PrevLogIdx].Term != args.PreLogTerm {
+			// 为了防止极端情况陷入的死循环，所以需要保证冲突点的日志term<=args.Term
+			for i := args.PrevLogIdx; i >= 0; i-- {
+				if rf.log[i].Term <= args.PreLogTerm {
+					reply.ConflictIdx, reply.ConflictTerm = args.PrevLogIdx, rf.log[args.PrevLogIdx].Term
+					break
+				}
+			}
+		}
+
+		reply.Term, reply.Success = rf.currentTerm, false
+		return
+	}
+
+	// 开始进行同步
+	// 如果是空包就没必要浪费时间再复制一份了
+	if len(args.Entries) > 0 {
+		rf.log = append(rf.log[0:args.PrevLogIdx+1], args.Entries...)
+		DPrintf("节点%v log rep ", rf.me)
+	}
+
+	// commit逻辑
+	if args.LeaderCommit > rf.commitIdx {
+		rf.commitIdx = min(args.LeaderCommit, len(rf.log)-1)
+		rf.applyChanCond.Signal()
+	}
 
 	reply.Term, reply.Success = rf.currentTerm, true
 }
@@ -310,17 +367,24 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 //
 // return index, term, isLeader
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	if rf.state != leader {
 		// 应该直接返回错误
+		return -1, -1, false
 	}
+
+	index := len(rf.log)
+	term := rf.currentTerm
+	isLeader := rf.state == leader
+
+	// todo:在rf.log中添加新日志，并且广播出去
+	newLog := LogEntry{Command: command, Term: term}
+	rf.log = append(rf.log, newLog)
+	go rf.sendHeartBeat(false)
+	// DPrintf("start")
 
 	return index, term, isLeader
 }
@@ -344,41 +408,175 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+// 发送心跳和日志复制
 func (rf *Raft) sendHeartBeat(isHeartBeat bool) {
-	// 保证原子化读，加读锁
-	rf.mu.RLock()
-	args := &AppendEntriesArgs{
-		Term:       rf.currentTerm,
-		LeadId:     rf.me,
-		PrevLogIdx: len(rf.log),
-		PreLogTerm: rf.log[len(rf.log)-1].Term,
-		LeadCommit: rf.commitIdx,
-	}
-	rf.mu.RUnlock()
-
-	for i := range rf.peers {
-		if i == rf.me {
+	// todo:现在是lab3B了，需要对这段逻辑进行大改
+	for server := range rf.peers {
+		if server == rf.me {
 			continue
 		}
 
-		// 给其他节点发送消息后，对于选举环节来说，只需要处理别人的term就行了
-		go func(server int) {
-			reply := &AppendEntriesReply{}
-			// DPrintf("节点%v isleader%v 给节点%v 发送心跳", rf.me, rf.state == leader, server)
-			if rf.sendAppendEntries(server, args, reply) {
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
+		if !isHeartBeat {
+			// todo 可以单独处理非心跳的处理逻辑
+		} else {
+			// DPrintf("leader开始发送心跳")
+		}
+		// DPrintf("heart signal 唤醒%v ",server)
 
-				// 如果term比自己大，那么就应该更新term，并且将自己转化成follower(当前节点可能是老leader)
-				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-					rf.stateTransform(follower)
-				}
-			}
-		}(i)
-
+		rf.replicatorCond[server].Signal()
 	}
 
+}
+
+// 生成AE，加锁的事情自己外面保证
+func (rf *Raft) generateAppendEntriesArgs(server int) *AppendEntriesArgs {
+	preLogIdx := rf.nextIdx[server] - 1
+	// 执行深拷贝，是为了防止log发生扩容而产生的线程安全问题
+	entries := make([]LogEntry, len(rf.log[preLogIdx+1:]))
+	copy(entries, rf.log[preLogIdx+1:])
+	args := &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIdx:   preLogIdx,
+		PreLogTerm:   rf.log[preLogIdx].Term,
+		LeaderCommit: rf.commitIdx,
+		Entries:      entries,
+	}
+	return args
+}
+
+// 发送和处理AE的逻辑，同步follower和leader之间的日志逻辑
+func (rf *Raft) syncLogOnce(server int) {
+	rf.mu.RLock()
+
+	if rf.state != leader {
+		// 为了解决非原子性的问题，外部逻辑判断再发送消息，并非原子的所以需要有这一段
+		rf.mu.RUnlock()
+		return
+	}
+
+	args := rf.generateAppendEntriesArgs(server)
+	rf.mu.RUnlock()
+
+	reply := &AppendEntriesReply{}
+	if rf.sendAppendEntries(server, args, reply) {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		// 这一步和election差不多，任何时候都只处理当前term的请求，以及需要确保自己的状态
+		// 原则上不处理过期数据
+		if args.Term == rf.currentTerm && rf.state == leader {
+			// 判断一下unsuccess的原因
+			if !reply.Success {
+				// 如果term比自己大，那么就应该更新term，并且将自己转化成follower(当前节点可能是老leader)
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm, rf.votedFor = reply.Term, -1
+					rf.stateTransform(follower)
+				} else {
+					// 开始着手解决日志冲突的问题
+					// 从conflict点出发，知道碰见第一个<=conflictTerm的log
+					for i := reply.ConflictIdx; i >= 0; i-- {
+						if rf.log[i].Term <= reply.ConflictTerm {
+							// 如果rf.log[reply.ConflictIdx].Term <= reply.ConflictTerm，就会陷入无限死循环
+							// 理论上不会出现上面说的，因为term大的才能选举成功，但是极端环境下还是会出现的
+							// 假如旧leader的日志没有复制过去，并且正好断联了，新leader上任后又重联了，就会出现上面的问题
+							rf.nextIdx[server] = i + 1
+							break
+						}
+
+						// DPrintf("Log rep Conflict")
+					}
+				}
+			} else {
+				// 日志追加成功，commit逻辑
+				rf.nextIdx[server] = rf.nextIdx[server] + len(args.Entries)
+				rf.matchIdx[server] = rf.nextIdx[server] - 1
+				rf.commitAndApply()
+			}
+
+		}
+
+	}
+}
+
+// 判断一下当前状态是否能进行commit，然后将apply唤醒
+func (rf *Raft) commitAndApply() {
+	matchIdx := make([]int, len(rf.peers))
+	copy(matchIdx, rf.matchIdx)
+
+	sort.Ints(matchIdx)
+
+	// 日志过半复制点，进行commit，并唤醒apply
+	// 为了防止奇怪的错误，leader只能间接提交其他term内的日志(论文5.4)
+	overHalfReplicatedIdx := matchIdx[len(rf.peers)/2]
+	if overHalfReplicatedIdx > rf.commitIdx && rf.log[overHalfReplicatedIdx].Term == rf.currentTerm {
+		rf.commitIdx = overHalfReplicatedIdx
+		rf.applyChanCond.Signal()
+		Record(LogCommitTag, fmt.Sprintf(LogCommitDesc, overHalfReplicatedIdx),
+			fmt.Sprintf("Log Commit 当前leader:%v commitIdx:%v", rf.me, rf.commitIdx))
+	}
+}
+
+// 判断当前是否应该同步leader和follower[server]之间的日志差异
+func (rf *Raft) isLogSync(server int) bool {
+	// todo:加锁和比较日志逻辑
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+	return rf.state == leader && rf.nextIdx[server] == len(rf.log)
+}
+
+// 心跳和日志复制的底层机制
+func (rf *Raft) replicator(server int) {
+	rf.replicatorCond[server].L.Lock()
+	defer rf.replicatorCond[server].L.Unlock()
+	for rf.killed() == false {
+		// 被唤醒了就发送一次日志同步
+		rf.replicatorCond[server].Wait()
+		rf.syncLogOnce(server)
+		// 进行同步检测，如果leader和follower之间日志不同步则通过for完成同步过程
+		// 同样也需要保证在这个过程中state=leader，需要保证旧leader能正常变成follower
+		// todo：判断和发送不是原子的，所以可能会出现一定的线程安全问题
+		for !rf.isLogSync(server) {
+			rf.syncLogOnce(server)
+		}
+	}
+}
+
+// 当有日志被提交的时候，应该将其应用到rf.applyChan
+func (rf *Raft) applier() {
+	rf.applyChanCond.L.Lock()
+	defer rf.applyChanCond.L.Unlock()
+
+	for rf.killed() == false {
+		for rf.commitIdx <= rf.lastApplied {
+			rf.applyChanCond.Wait()
+		}
+
+		// 唤醒后开始进行commit逻辑
+		rf.mu.RLock()
+		// todo：这里有一个写操作，理论上应该加写锁
+		// 保证可见性
+
+		rf.lastApplied++
+		applyMsg := raftapi.ApplyMsg{
+			CommandValid: true,
+			Command:      rf.log[rf.lastApplied].Command,
+			CommandIndex: rf.lastApplied,
+		}
+
+		rf.mu.RUnlock()
+
+		rf.applyChan <- applyMsg
+		DPrintf("Log Apply 当前节点:%v applyLogTerm:%v applyLogIdx:%v ", rf.me, applyMsg.CommandIndex, rf.log[rf.lastApplied].Term)
+	}
+}
+
+// leader上任成功后，需要进行一些参数的初始化
+func (rf *Raft) initLeaderParms() {
+	for server := range rf.peers {
+		rf.nextIdx[server] = len(rf.log)
+		rf.matchIdx[server] = 0
+	}
 }
 
 // candidate用的，进行选举的逻辑
@@ -407,7 +605,6 @@ func (rf *Raft) startElection() {
 		go func(server int) {
 			reply := &RequestVoteReply{}
 			if rf.sendRequestVote(server, args, reply) {
-				// todo：这里其实可以选择在外面建立一个新的锁来提升安全和效率
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 
@@ -421,9 +618,14 @@ func (rf *Raft) startElection() {
 						if voteCnt > len(rf.peers)/2 {
 							// 选举成功，开始发送心跳
 							// todo：leader上任以后，对数据需要做一些额外处理
-							Record("election", "选举成功", fmt.Sprintf("节点%v选举成功", rf.me))
+
+							Record(ElectionTag,
+								fmt.Sprintf(ElectionResDesc, rf.me),
+								fmt.Sprintf("Election success 节点%v选举成功 当前term:%v lastLog[idx:%v,term:%v]", rf.me, rf.currentTerm, len(rf.log)-1, rf.log[len(rf.log)-1].Term))
+
 							rf.stateTransform(leader)
-							// 这里必须要用go，因为发送心跳的逻辑就有上锁逻辑，go又不设计可重入
+							rf.initLeaderParms()
+							// election和log replicate用一个协程专门负责沟通，虽然也可以不用go
 							go rf.sendHeartBeat(true)
 						}
 
@@ -461,9 +663,11 @@ func (rf *Raft) ticker() {
 		case <-rf.electionTimer.C:
 			// 超时，开始进行选举，状态转换，问题进行简化，在选举过程中
 			rf.mu.Lock()
-			Record("election",
-				fmt.Sprintf("节点%v开始进行选举", rf.me),
-				fmt.Sprintf("节点%v超时开始进行选举,当前term是:%v", rf.me, rf.currentTerm))
+
+			Record(ElectionTag,
+				fmt.Sprintf(ElectionStartDesc, rf.me),
+				fmt.Sprintf("节点%v开始进行选举 当前term:%v", rf.me, rf.currentTerm))
+
 			rf.stateTransform(candidate)
 			rf.startElection()
 			// 直接进行重置，如果选举成功了，在状态转化里进行终止
@@ -532,12 +736,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		log:            make([]LogEntry, 1),
 		commitIdx:      0,
 		lastApplied:    0,
-		nextIdx:        make([]int, 1),
-		matchIdx:       make([]int, 1),
+		nextIdx:        make([]int, len(peers)),
+		matchIdx:       make([]int, len(peers)),
 		state:          follower,
 		electionTimer:  time.NewTimer(GetRandomElectionTimeout()),
 		heartBeatTimer: time.NewTimer(GetStableHeartBeatTimeout()),
 		applyChan:      applyCh,
+		replicatorCond: make([]*sync.Cond, len(peers)),
+		applyChanCond:  sync.NewCond(&sync.Mutex{}),
 	}
 
 	// Your initialization code here (3A, 3B, 3C).
@@ -545,8 +751,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	for server := range rf.peers {
+		if server != rf.me {
+			rf.replicatorCond[server] = sync.NewCond(&sync.Mutex{})
+			go rf.replicator(server)
+		}
+
+	}
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applier()
 
 	return rf
 }

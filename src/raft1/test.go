@@ -61,7 +61,8 @@ func (ts *Test) restart(i int) {
 	ts.Group(tester.GRP0).ConnectAll()
 }
 
-// 测试election，10轮内(每一轮都会睡一会)，必须保证 有且只有 一个leader存在
+// 测试election，10轮内(每一轮都会睡一会)，必须保证 有且只有 一个leader存在，
+// leader选举出来以后就会立马返回
 //
 // return leaderIdx
 func (ts *Test) checkOneLeader() int {
@@ -128,7 +129,8 @@ func (ts *Test) checkTerms() int {
 	return term
 }
 
-// 暂时没太懂干啥的
+// 该方法在server里的applier被用了，其实是用来提交从channel里的cmd到rfsrv.logs里去的，
+// 方便后续的检查之类的
 func (ts *Test) checkLogs(i int, m raftapi.ApplyMsg) (string, bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -137,6 +139,7 @@ func (ts *Test) checkLogs(i int, m raftapi.ApplyMsg) (string, bool) {
 	v := m.Command
 	me := ts.srvs[i]
 	for j, rs := range ts.srvs {
+		// 如果提交的msg的位置有其他的msg在的话就会err
 		if old, oldok := rs.Logs(m.CommandIndex); oldok && old != v {
 			//log.Printf("%v: log %v; server %v\n", i, me.logs, rs.logs)
 			// some server has already committed a different value for this entry!

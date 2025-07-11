@@ -20,3 +20,30 @@ func Record(tag, desp, details string) {
 	tester.Annotate(tag, desp, details)
 	DPrintf(details)
 }
+
+const (
+	NodeTag      string = "节点%v"
+	ElectionTag  string = "选举"
+	LogCommitTag string = "日志提交"
+)
+
+const (
+	NodeElectionVoteDesc         string = "ele:%v"
+	NodeLogReplicateDesc         string = "repIdx:%v"
+	NodeLogReplicateConflictDesc string = "冲突"
+
+	ElectionStartDesc string = "%v开选举"
+	ElectionResDesc   string = "%v选举成功"
+
+	LogReplicateDesc string = "log过半复制idx:%v"
+	LogCommitDesc    string = "log提交到idx:%v"
+	AEConflictDesc        string = "AE Conf"
+	AEAccessDesc string = "AE Acc"
+)
+
+const (
+	NodeElectionVoteDetail string = "当前节点term:%v 请求节点%v term:%v"
+	NodeLogReplicateDetail string = ""
+
+	ElectionStartDetail string = "节点%v开始进行选举 当前term:%v"
+)

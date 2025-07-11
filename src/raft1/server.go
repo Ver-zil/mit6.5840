@@ -102,6 +102,7 @@ func (rs *rfsrv) applier(applyCh chan raftapi.ApplyMsg) {
 		if m.CommandValid == false {
 			// ignore other types of ApplyMsg
 		} else {
+			// checkLogs里将msg提交到logs里，如果msg应该提交的位置已经有消息存在了则会直接报错
 			err_msg, prevok := rs.ts.checkLogs(rs.me, m)
 			if m.CommandIndex > 1 && prevok == false {
 				err_msg = fmt.Sprintf("server %v apply out of order %v", rs.me, m.CommandIndex)
