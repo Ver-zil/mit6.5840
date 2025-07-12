@@ -54,7 +54,7 @@ func GetRandomElectionTimeout() time.Duration {
 }
 
 func GetStableHeartBeatTimeout() time.Duration {
-	return time.Duration(HeartBeatTimeout) * time.Microsecond
+	return time.Duration(HeartBeatTimeout) * time.Millisecond
 }
 
 type LogEntry struct {
