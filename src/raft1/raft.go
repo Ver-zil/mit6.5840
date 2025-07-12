@@ -8,6 +8,7 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -115,6 +117,8 @@ func (rf *Raft) GetState() (int, bool) {
 // second argument to persister.Save().
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
+//
+// 任何修改了三个需要持久化状态的点都需要进行persist
 func (rf *Raft) persist() {
 	// Your code here (3C).
 	// Example:
@@ -124,6 +128,18 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+
+	// persist的时候在外面加锁，在这加锁容易死锁
+	// rf.mu.RLock()
+	// defer rf.mu.RUnlock()
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -144,6 +160,21 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	// rf.mu.Lock()
+	// defer rf.mu.Unlock()
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm, votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		DPrintf("decoder err current:%v voteFor:%v log:%v", currentTerm, votedFor, log)
+	}
+
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.log = log
 }
 
 // how many bytes in Raft's persisted log?
@@ -205,8 +236,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		// 如果args的term更大，则需要比较其他方面的信息，重置投票逻辑
 		// 考虑到旧leader的场景，需要将状态转成follower
-		rf.currentTerm, rf.votedFor = args.Term, -1
 		rf.stateTransform(follower)
+		rf.currentTerm, rf.votedFor = args.Term, -1
+		rf.persist()
 	}
 
 	if !rf.isUpToDateLog(args.LastLogIdx, args.LastLogTerm) {
@@ -219,6 +251,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 重置当前节点的超时选举时间
 	rf.electionTimer.Reset(GetRandomElectionTimeout())
 	rf.votedFor = args.CandidateId
+	rf.persist()
 	reply.Term, reply.VoteGranted = rf.currentTerm, true
 }
 
@@ -303,8 +336,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 对于选举这个问题来说，第一个需要处理的就是当args.term比自己大的时候，不论是否为leader，都应该将自己变成follower
 	// 如果是
 	if args.Term > rf.currentTerm {
-		rf.currentTerm, rf.votedFor = args.Term, -1
 		rf.stateTransform(follower)
+		rf.currentTerm, rf.votedFor = args.Term, -1
+		rf.persist()
 	}
 	rf.electionTimer.Reset(GetRandomElectionTimeout())
 	// DPrintf("节点%v接收心跳并重置计时器", rf.me)
@@ -335,6 +369,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 如果是空包就没必要浪费时间再复制一份了
 	if len(args.Entries) > 0 {
 		rf.log = append(rf.log[0:args.PrevLogIdx+1], args.Entries...)
+		rf.persist()
 		DPrintf("节点%v log rep ", rf.me)
 	}
 
@@ -383,6 +418,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// todo:在rf.log中添加新日志，并且广播出去
 	newLog := LogEntry{Command: command, Term: term}
 	rf.log = append(rf.log, newLog)
+	rf.persist()
 	// 更新自己的matchIdx方便逻辑处理
 	rf.matchIdx[rf.me] = len(rf.log) - 1
 	go rf.sendHeartBeat(false)
@@ -472,8 +508,9 @@ func (rf *Raft) syncLogOnce(server int) {
 			if !reply.Success {
 				// 如果term比自己大，那么就应该更新term，并且将自己转化成follower(当前节点可能是老leader)
 				if reply.Term > rf.currentTerm {
-					rf.currentTerm, rf.votedFor = reply.Term, -1
 					rf.stateTransform(follower)
+					rf.currentTerm, rf.votedFor = reply.Term, -1
+					rf.persist()
 				} else {
 					// 开始着手解决日志冲突的问题
 					// 从conflict点出发，知道碰见第一个<=conflictTerm的log
@@ -589,6 +626,7 @@ func (rf *Raft) startElection() {
 	// 问题简化：candidate选举不需要和超时机制同步进行
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.persist()
 
 	// 在处理其他vote的时候，可能会涉及到这些临界资源的修改，所以单独拿出来，外部加锁了，所以这里的资源是安全的
 	args := &RequestVoteArgs{
@@ -637,8 +675,9 @@ func (rf *Raft) startElection() {
 					} else if reply.Term > rf.currentTerm {
 						// 当前节点的term有问题，可能是断联了很久的节点突然醒了，直接进入follower
 						// term和voteFor同步更新
-						rf.currentTerm, rf.votedFor = reply.Term, -1
 						rf.stateTransform(follower)
+						rf.currentTerm, rf.votedFor = reply.Term, -1
+						rf.persist()
 					}
 				}
 
