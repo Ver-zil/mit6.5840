@@ -383,6 +383,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// todo:在rf.log中添加新日志，并且广播出去
 	newLog := LogEntry{Command: command, Term: term}
 	rf.log = append(rf.log, newLog)
+	// 更新自己的matchIdx方便逻辑处理
+	rf.matchIdx[rf.me] = len(rf.log) - 1
 	go rf.sendHeartBeat(false)
 	// DPrintf("start")
 
@@ -487,10 +489,12 @@ func (rf *Raft) syncLogOnce(server int) {
 						// DPrintf("Log rep Conflict")
 					}
 				}
-			} else {
+			} else if len(args.Entries) > 0 {
+				// 增加if 对于心跳逻辑没必要单独多做其他方面的判断(心跳本身就是没有冲突的表示，就算回来的rpc丢了也不会有没同步的问题，下次依然会带着log发过去)
 				// 日志追加成功，commit逻辑
 				rf.nextIdx[server] = rf.nextIdx[server] + len(args.Entries)
 				rf.matchIdx[server] = rf.nextIdx[server] - 1
+				// DPrintf("follower %v rf.nextIdx:%v rf.matchIdx:%v", server, rf.nextIdx[server], rf.matchIdx[server])
 				rf.commitAndApply()
 			}
 
@@ -532,6 +536,7 @@ func (rf *Raft) replicator(server int) {
 	for rf.killed() == false {
 		// 被唤醒了就发送一次日志同步
 		rf.replicatorCond[server].Wait()
+		// DPrintf("leader:%v follower:%v ",rf.me,server)
 		rf.syncLogOnce(server)
 		// 进行同步检测，如果leader和follower之间日志不同步则通过for完成同步过程
 		// 同样也需要保证在这个过程中state=leader，需要保证旧leader能正常变成follower
@@ -567,7 +572,7 @@ func (rf *Raft) applier() {
 		rf.mu.RUnlock()
 
 		rf.applyChan <- applyMsg
-		DPrintf("Log Apply 当前节点:%v applyLogTerm:%v applyLogIdx:%v ", rf.me, applyMsg.CommandIndex, rf.log[rf.lastApplied].Term)
+		DPrintf("Log Apply 当前节点:%v applyLogTerm:%v applyLogIdx:%v ", rf.me, rf.log[rf.lastApplied].Term, applyMsg.CommandIndex)
 	}
 }
 
