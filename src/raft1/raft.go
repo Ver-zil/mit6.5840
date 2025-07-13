@@ -169,12 +169,13 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm, votedFor int
 	var log []LogEntry
 	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
-		DPrintf("decoder err current:%v voteFor:%v log:%v", currentTerm, votedFor, log)
+		DPrintf("curNode:%v decoder err current:%v voteFor:%v log:%v", rf.me, currentTerm, votedFor, log)
 	}
 
 	rf.currentTerm = currentTerm
 	rf.votedFor = votedFor
 	rf.log = log
+	DPrintf("Recovery curNode:%v rf.log[%v]", rf.me, rf.log)
 }
 
 // how many bytes in Raft's persisted log?
@@ -570,15 +571,17 @@ func (rf *Raft) isLogSync(server int) bool {
 func (rf *Raft) replicator(server int) {
 	rf.replicatorCond[server].L.Lock()
 	defer rf.replicatorCond[server].L.Unlock()
+
 	for rf.killed() == false {
 		// 被唤醒了就发送一次日志同步
 		rf.replicatorCond[server].Wait()
-		// DPrintf("leader:%v follower:%v ",rf.me,server)
+		DPrintf("leader:%v follower:%v ",rf.me,server)
 		rf.syncLogOnce(server)
 		// 进行同步检测，如果leader和follower之间日志不同步则通过for完成同步过程
 		// 同样也需要保证在这个过程中state=leader，需要保证旧leader能正常变成follower
 		// todo：判断和发送不是原子的，所以可能会出现一定的线程安全问题
-		for !rf.isLogSync(server) {
+		// 加入kill判断，如果没被kill才继续同步的逻辑
+		for !rf.isLogSync(server) && !rf.killed() {
 			rf.syncLogOnce(server)
 		}
 	}
@@ -592,6 +595,8 @@ func (rf *Raft) applier() {
 	for rf.killed() == false {
 		for rf.commitIdx <= rf.lastApplied {
 			rf.applyChanCond.Wait()
+
+			// 这里应该加一个判断，如果kill则直接return
 		}
 
 		// 唤醒后开始进行commit逻辑
@@ -706,6 +711,10 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.electionTimer.C:
 			// 超时，开始进行选举，状态转换，问题进行简化，在选举过程中
+			// 应该考虑3C里被kill的情况，kill后就不应该发起election了
+			if rf.killed(){
+				return
+			}
 			rf.mu.Lock()
 
 			Record(ElectionTag,
@@ -715,7 +724,7 @@ func (rf *Raft) ticker() {
 			rf.stateTransform(candidate)
 			rf.startElection()
 			// 直接进行重置，如果选举成功了，在状态转化里进行终止
-			// rf.electionTimer.Reset(GetRandomElectionTimeout())
+			rf.electionTimer.Reset(GetRandomElectionTimeout())
 			rf.mu.Unlock()
 		case <-rf.heartBeatTimer.C:
 			// 发送心跳包
@@ -731,15 +740,15 @@ func (rf *Raft) ticker() {
 // 状态转化只管打点计时器相关的部分
 // 目前状态转化只存在几种形式
 // follower->follower, follower->candidate
-// candidate->follower, candidate->leader
+// candidate->follower, candidate->leader，candidate->candidate
 // leader->follower
 func (rf *Raft) stateTransform(state int) {
 	// todo 可能需要考虑一点数据安全性的问题，但是一般状态转化的时候外面都会上锁
 	// 上锁的核心原因在于rf的一些数据需要进行写操作修改，为了保证这个环节的正确性，防止意外，还是上锁安全
-	// if rf.state == state {
-	// 	// 重复请求不做处理
-	// 	return
-	// }
+	if rf.state == state {
+		// follower->follower这情况下，为了防止lab3C新加入的节点容易在election上浪费太多时间
+		return
+	}
 	rf.state = state
 
 	switch state {

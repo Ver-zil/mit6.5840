@@ -835,6 +835,7 @@ func TestPersist23C(t *testing.T) {
 		ts.g.ShutdownServer((leader1 + 1) % servers)
 		ts.g.ShutdownServer((leader1 + 2) % servers)
 		tester.AnnotateShutdown([]int{(leader1 + 1) % servers, (leader1 + 2) % servers})
+		DPrintf("ShutDown Node [%v, %v]", (leader1+1)%servers, (leader1+2)%servers)
 
 		ts.one(10+index, servers-2, true)
 		index++
@@ -842,17 +843,20 @@ func TestPersist23C(t *testing.T) {
 		ts.g.ShutdownServer((leader1 + 0) % servers)
 		ts.g.ShutdownServer((leader1 + 3) % servers)
 		ts.g.ShutdownServer((leader1 + 4) % servers)
+		DPrintf("ShutDown Node [%v, %v, %v]", (leader1+0)%servers, (leader1+3)%servers, (leader1+4)%servers)
 		tester.AnnotateShutdown([]int{
 			(leader1 + 0) % servers, (leader1 + 3) % servers, (leader1 + 4) % servers,
 		})
 
 		ts.restart((leader1 + 1) % servers)
 		ts.restart((leader1 + 2) % servers)
+		DPrintf("Restart Node [%v, %v]", (leader1+1)%servers, (leader1+2)%servers)
 		tester.AnnotateRestart([]int{(leader1 + 1) % servers, (leader1 + 2) % servers})
 
 		time.Sleep(RaftElectionTimeout)
 
 		ts.restart((leader1 + 3) % servers)
+		DPrintf("Restart Node [%v]", (leader1+3)%servers)
 		tester.AnnotateRestart([]int{(leader1 + 3) % servers})
 
 		ts.one(10+index, servers-2, true)
@@ -860,7 +864,9 @@ func TestPersist23C(t *testing.T) {
 
 		ts.restart((leader1 + 4) % servers)
 		ts.restart((leader1 + 0) % servers)
+		DPrintf("Restart Node [%v, %v]", (leader1+4)%servers, (leader1+0)%servers)
 		tester.AnnotateRestart([]int{(leader1 + 4) % servers, (leader1 + 0) % servers})
+		DPrintf("Seg -----------------------------------------------------------------")
 	}
 
 	ts.one(1000, servers, true)
