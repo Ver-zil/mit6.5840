@@ -30,7 +30,7 @@ const (
 )
 
 const (
-	ElectionTimeout  = 500
+	ElectionTimeout  = 1000
 	HeartBeatTimeout = 125
 )
 
@@ -191,7 +191,7 @@ func (rf *Raft) PersistBytes() int {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
-
+	DPrintf("\nLOG node:%v commitIdx:%v lastApply:%v   log:%v \n", rf.me, rf.commitIdx, rf.lastApplied, rf.log)
 }
 
 // example RequestVote RPC arguments structure.
@@ -238,6 +238,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// 如果args的term更大，则需要比较其他方面的信息，重置投票逻辑
 		// 考虑到旧leader的场景，需要将状态转成follower
 		rf.stateTransform(follower)
+		rf.electionTimer.Reset(GetRandomElectionTimeout())
 		rf.currentTerm, rf.votedFor = args.Term, -1
 		rf.persist()
 	}
@@ -356,7 +357,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// 为了防止极端情况陷入的死循环，所以需要保证冲突点的日志term<=args.Term
 			for i := args.PrevLogIdx; i >= 0; i-- {
 				if rf.log[i].Term <= args.PreLogTerm {
-					reply.ConflictIdx, reply.ConflictTerm = args.PrevLogIdx, rf.log[args.PrevLogIdx].Term
+					// reply.ConflictIdx, reply.ConflictTerm = args.PrevLogIdx, rf.log[args.PrevLogIdx].Term
+					reply.ConflictIdx, reply.ConflictTerm = i, rf.log[i].Term
 					break
 				}
 			}
@@ -438,6 +440,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
+	// 这个东西在极端场景下会导致不一致的问题，因为只是模拟的kill，不是真的kill
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 }
@@ -471,6 +474,7 @@ func (rf *Raft) sendHeartBeat(isHeartBeat bool) {
 func (rf *Raft) generateAppendEntriesArgs(server int) *AppendEntriesArgs {
 	preLogIdx := rf.nextIdx[server] - 1
 	// 执行深拷贝，是为了防止log发生扩容而产生的线程安全问题
+	DPrintf("GAEArgs rf.me:%v server:%v logLen:%v prelogIdx:%v", rf.me, server, len(rf.log), preLogIdx)
 	entries := make([]LogEntry, len(rf.log[preLogIdx+1:]))
 	copy(entries, rf.log[preLogIdx+1:])
 	args := &AppendEntriesArgs{
@@ -523,8 +527,10 @@ func (rf *Raft) syncLogOnce(server int) {
 							rf.nextIdx[server] = i + 1
 							break
 						}
+					}
 
-						// DPrintf("Log rep Conflict")
+					if rf.nextIdx[server] < len(rf.log) {
+						DPrintf("AE Conflict Leader:%v follower:%v 重定位点[idx:%v, log:%v]", rf.me, server, rf.nextIdx[server]-1, rf.log[rf.nextIdx[server]-1])
 					}
 				}
 			} else if len(args.Entries) > 0 {
@@ -575,14 +581,18 @@ func (rf *Raft) replicator(server int) {
 	for rf.killed() == false {
 		// 被唤醒了就发送一次日志同步
 		rf.replicatorCond[server].Wait()
-		DPrintf("leader:%v follower:%v ",rf.me,server)
+		DPrintf("replicator leader:%v follower:%v ", rf.me, server)
 		rf.syncLogOnce(server)
 		// 进行同步检测，如果leader和follower之间日志不同步则通过for完成同步过程
 		// 同样也需要保证在这个过程中state=leader，需要保证旧leader能正常变成follower
 		// todo：判断和发送不是原子的，所以可能会出现一定的线程安全问题
 		// 加入kill判断，如果没被kill才继续同步的逻辑
 		for !rf.isLogSync(server) && !rf.killed() {
+			// start := time.Now()
 			rf.syncLogOnce(server)
+			// if time.Since(start).Milliseconds() > HeartBeatTimeout {
+			// 	DPrintf("replicator2 leader:%v follower:%v finishTime:%v", rf.me, server, time.Since(start))
+			// }
 		}
 	}
 }
@@ -615,6 +625,26 @@ func (rf *Raft) applier() {
 
 		rf.applyChan <- applyMsg
 		DPrintf("Log Apply 当前节点:%v applyLogTerm:%v applyLogIdx:%v ", rf.me, rf.log[rf.lastApplied].Term, applyMsg.CommandIndex)
+
+		// rf.mu.Lock()
+		// lastApplied, commitIdx := rf.lastApplied, rf.commitIdx
+		// entries := make([]LogEntry, rf.commitIdx-rf.lastApplied)
+		// copy(entries, rf.log[rf.lastApplied+1:rf.commitIdx+1])
+		// rf.mu.Unlock()
+
+		// for i := lastApplied + 1; i <= commitIdx; i++ {
+		// 	applyMsg := raftapi.ApplyMsg{
+		// 		CommandValid: true,
+		// 		Command:      rf.log[i].Command,
+		// 		CommandIndex: i,
+		// 	}
+		// 	rf.applyChan <- applyMsg
+		// 	DPrintf("Log Apply 当前节点:%v applyLogTerm:%v applyLogIdx:%v ", rf.me, rf.log[rf.lastApplied].Term, applyMsg.CommandIndex)
+		// }
+
+		// rf.mu.Lock()
+		// rf.lastApplied = commitIdx
+		// rf.mu.Unlock()
 	}
 }
 
@@ -712,7 +742,7 @@ func (rf *Raft) ticker() {
 		case <-rf.electionTimer.C:
 			// 超时，开始进行选举，状态转换，问题进行简化，在选举过程中
 			// 应该考虑3C里被kill的情况，kill后就不应该发起election了
-			if rf.killed(){
+			if rf.killed() {
 				return
 			}
 			rf.mu.Lock()
@@ -729,10 +759,12 @@ func (rf *Raft) ticker() {
 		case <-rf.heartBeatTimer.C:
 			// 发送心跳包
 			// 如果当前是leader，则发送心跳，并且重置计时器
+			rf.mu.Lock()
 			if rf.state == leader {
 				go rf.sendHeartBeat(true)
 				rf.heartBeatTimer.Reset(GetStableHeartBeatTimeout())
 			}
+			rf.mu.Unlock()
 		}
 	}
 }
