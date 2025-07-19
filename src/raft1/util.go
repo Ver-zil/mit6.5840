@@ -1,7 +1,9 @@
 package raft
 
 import (
+	"fmt"
 	"log"
+	"time"
 
 	tester "6.5840/tester1"
 )
@@ -37,8 +39,8 @@ const (
 
 	LogReplicateDesc string = "log过半复制idx:%v"
 	LogCommitDesc    string = "log提交到idx:%v"
-	AEConflictDesc        string = "AE Conf"
-	AEAccessDesc string = "AE Acc"
+	AEConflictDesc   string = "AE Conf"
+	AEAccessDesc     string = "AE Acc"
 )
 
 const (
@@ -47,3 +49,21 @@ const (
 
 	ElectionStartDetail string = "节点%v开始进行选举 当前term:%v"
 )
+
+type ExecutionTimer struct {
+	start    time.Time
+	// messages []string
+}
+
+// 创建计时器（自动开始计时）
+func NewTimer() *ExecutionTimer {
+	return &ExecutionTimer{
+		start: time.Now(),
+	}
+}
+
+func (t *ExecutionTimer) LogPhase(format string, a ...interface{}) {
+	elapsed := time.Since(t.start)
+	log.Printf("msg:%v time:%v", fmt.Sprintf(format, a...), elapsed)
+	// t.messages = append(t.messages, fmt.Sprintf("[%s] %v", phase, elapsed))
+}

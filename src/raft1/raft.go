@@ -27,6 +27,7 @@ const (
 	leader    int = 1
 	follower  int = 2
 	candidate int = 3
+	end       int = 4 // kill的时候转化的状态
 )
 
 const (
@@ -216,7 +217,6 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	// 选举逻辑，内部存在过多竞态资源，需要进行上锁
-	// todo:重置当前节点的超时机制
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer func() {
@@ -354,9 +354,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.ConflictIdx, reply.ConflictTerm = curLogLastIdx, rf.log[curLogLastIdx].Term
 		} else if rf.log[args.PrevLogIdx].Term != args.PreLogTerm {
 			// 为了防止极端情况陷入的死循环，所以需要保证冲突点的日志term<=args.Term
+			// todo 这里得特别注意一下i=0的边界情况
 			for i := args.PrevLogIdx; i >= 0; i-- {
 				if rf.log[i].Term <= args.PreLogTerm {
-					reply.ConflictIdx, reply.ConflictTerm = args.PrevLogIdx, rf.log[args.PrevLogIdx].Term
+					reply.ConflictIdx, reply.ConflictTerm = i, rf.log[i].Term
 					break
 				}
 			}
@@ -368,17 +369,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 开始进行同步
 	// 如果是空包就没必要浪费时间再复制一份了
+	// 【日志同步】负责复制日志，心跳负责提交日志
 	if len(args.Entries) > 0 {
 		rf.log = append(rf.log[0:args.PrevLogIdx+1], args.Entries...)
 		rf.persist()
 		DPrintf("节点%v log rep ", rf.me)
+	} else if len(args.Entries) == 0 && min(args.LeaderCommit, args.PrevLogIdx) > rf.commitIdx {
+		rf.commitIdx = min(args.LeaderCommit, args.PrevLogIdx)
+		DPrintf("node:%v commitidx:%v", rf.me, rf.commitIdx)
+		rf.applyChanCond.Signal()
 	}
 
 	// commit逻辑
-	if args.LeaderCommit > rf.commitIdx {
-		rf.commitIdx = min(args.LeaderCommit, len(rf.log)-1)
-		rf.applyChanCond.Signal()
-	}
+	// 为了兼容心跳空包逻辑，如果是心跳的话，就不能commit，只有日志同步的时候才能触发 commit
+	// if args.LeaderCommit > rf.commitIdx {
+	// 	rf.commitIdx = min(args.LeaderCommit, len(rf.log)-1)
+	// 	rf.applyChanCond.Signal()
+	// }
 
 	reply.Term, reply.Success = rf.currentTerm, true
 }
@@ -416,7 +423,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := rf.currentTerm
 	isLeader := rf.state == leader
 
-	// todo:在rf.log中添加新日志，并且广播出去
+	// note:在rf.log中添加新日志，并且广播出去
 	newLog := LogEntry{Command: command, Term: term}
 	rf.log = append(rf.log, newLog)
 	rf.persist()
@@ -438,6 +445,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
+	// 真实环境下，kill以后就不会再运行了
+	// note:test模拟的时候，并非真的kill，能发送信号只是不能接收，加锁可防止一些诡异的问题
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.stateTransform(end)
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 }
@@ -449,30 +461,34 @@ func (rf *Raft) killed() bool {
 
 // 发送心跳和日志复制
 func (rf *Raft) sendHeartBeat(isHeartBeat bool) {
-	// todo:现在是lab3B了，需要对这段逻辑进行大改
+	// note:现在是lab3B了，需要对这段逻辑进行大改
 	for server := range rf.peers {
 		if server == rf.me {
 			continue
 		}
 
 		if !isHeartBeat {
-			// todo 可以单独处理非心跳的处理逻辑
+
 		} else {
 			// DPrintf("leader开始发送心跳")
+			go rf.syncLogOnce(server, true)
 		}
 		// DPrintf("heart signal 唤醒%v ",server)
-
 		rf.replicatorCond[server].Signal()
 	}
 
 }
 
 // 生成AE，加锁的事情自己外面保证
-func (rf *Raft) generateAppendEntriesArgs(server int) *AppendEntriesArgs {
+func (rf *Raft) generateAppendEntriesArgs(server int, isHeartBeat bool) *AppendEntriesArgs {
 	preLogIdx := rf.nextIdx[server] - 1
 	// 执行深拷贝，是为了防止log发生扩容而产生的线程安全问题
-	entries := make([]LogEntry, len(rf.log[preLogIdx+1:]))
-	copy(entries, rf.log[preLogIdx+1:])
+	entries := []LogEntry{}
+	if !isHeartBeat {
+		entries = make([]LogEntry, len(rf.log[preLogIdx+1:]))
+		copy(entries, rf.log[preLogIdx+1:])
+	}
+
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
@@ -485,7 +501,7 @@ func (rf *Raft) generateAppendEntriesArgs(server int) *AppendEntriesArgs {
 }
 
 // 发送和处理AE的逻辑，同步follower和leader之间的日志逻辑
-func (rf *Raft) syncLogOnce(server int) {
+func (rf *Raft) syncLogOnce(server int, isHeartBeat bool) {
 	rf.mu.RLock()
 
 	if rf.state != leader {
@@ -494,7 +510,7 @@ func (rf *Raft) syncLogOnce(server int) {
 		return
 	}
 
-	args := rf.generateAppendEntriesArgs(server)
+	args := rf.generateAppendEntriesArgs(server, isHeartBeat)
 	rf.mu.RUnlock()
 
 	reply := &AppendEntriesReply{}
@@ -521,18 +537,19 @@ func (rf *Raft) syncLogOnce(server int) {
 							// 理论上不会出现上面说的，因为term大的才能选举成功，但是极端环境下还是会出现的
 							// 假如旧leader的日志没有复制过去，并且正好断联了，新leader上任后又重联了，就会出现上面的问题
 							rf.nextIdx[server] = i + 1
+							DPrintf("AE Conflict leader端 follower:%v nextidx:%v", server, i+1)
 							break
 						}
 
-						// DPrintf("Log rep Conflict")
 					}
 				}
 			} else if len(args.Entries) > 0 {
 				// 增加if 对于心跳逻辑没必要单独多做其他方面的判断(心跳本身就是没有冲突的表示，就算回来的rpc丢了也不会有没同步的问题，下次依然会带着log发过去)
 				// 日志追加成功，commit逻辑
-				rf.nextIdx[server] = rf.nextIdx[server] + len(args.Entries)
-				rf.matchIdx[server] = rf.nextIdx[server] - 1
-				// DPrintf("follower %v rf.nextIdx:%v rf.matchIdx:%v", server, rf.nextIdx[server], rf.matchIdx[server])
+				rf.matchIdx[server] = args.PrevLogIdx + len(args.Entries)
+				// note：如果发送给server的日志是多协程的话，rf.nextIdx[server]+len(args.Entries)会导致线程安全问题
+				rf.nextIdx[server] = rf.matchIdx[server] + 1
+				DPrintf("follower %v rf.nextIdx:%v rf.matchIdx:%v", server, rf.nextIdx[server], rf.matchIdx[server])
 				rf.commitAndApply()
 			}
 
@@ -561,7 +578,7 @@ func (rf *Raft) commitAndApply() {
 
 // 判断当前是否应该同步leader和follower[server]之间的日志差异
 func (rf *Raft) isLogSync(server int) bool {
-	// todo:加锁和比较日志逻辑
+	// note:加锁和比较日志逻辑
 	rf.mu.RLock()
 	defer rf.mu.RUnlock()
 	return rf.state == leader && rf.nextIdx[server] == len(rf.log)
@@ -573,17 +590,14 @@ func (rf *Raft) replicator(server int) {
 	defer rf.replicatorCond[server].L.Unlock()
 
 	for rf.killed() == false {
-		// 被唤醒了就发送一次日志同步
-		rf.replicatorCond[server].Wait()
-		DPrintf("leader:%v follower:%v ",rf.me,server)
-		rf.syncLogOnce(server)
+		// 被kill以后状态会变，不会发送，就算有意外情况也最多发一次
+		for rf.isLogSync(server) {
+			rf.replicatorCond[server].Wait()
+		}
 		// 进行同步检测，如果leader和follower之间日志不同步则通过for完成同步过程
 		// 同样也需要保证在这个过程中state=leader，需要保证旧leader能正常变成follower
-		// todo：判断和发送不是原子的，所以可能会出现一定的线程安全问题
-		// 加入kill判断，如果没被kill才继续同步的逻辑
-		for !rf.isLogSync(server) && !rf.killed() {
-			rf.syncLogOnce(server)
-		}
+		// note：判断和发送不是原子的，所以可能会出现一定的线程安全问题
+		rf.syncLogOnce(server, false)
 	}
 }
 
@@ -595,8 +609,6 @@ func (rf *Raft) applier() {
 	for rf.killed() == false {
 		for rf.commitIdx <= rf.lastApplied {
 			rf.applyChanCond.Wait()
-
-			// 这里应该加一个判断，如果kill则直接return
 		}
 
 		// 唤醒后开始进行commit逻辑
@@ -711,11 +723,12 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.electionTimer.C:
 			// 超时，开始进行选举，状态转换，问题进行简化，在选举过程中
-			// 应该考虑3C里被kill的情况，kill后就不应该发起election了
-			if rf.killed(){
+			// note: 应该考虑3C里被kill的情况，kill后就不应该发起election了
+			rf.mu.Lock()
+			if rf.killed() {
+				rf.mu.Unlock()
 				return
 			}
-			rf.mu.Lock()
 
 			Record(ElectionTag,
 				fmt.Sprintf(ElectionStartDesc, rf.me),
@@ -742,6 +755,7 @@ func (rf *Raft) ticker() {
 // follower->follower, follower->candidate
 // candidate->follower, candidate->leader，candidate->candidate
 // leader->follower
+// all->end
 func (rf *Raft) stateTransform(state int) {
 	// todo 可能需要考虑一点数据安全性的问题，但是一般状态转化的时候外面都会上锁
 	// 上锁的核心原因在于rf的一些数据需要进行写操作修改，为了保证这个环节的正确性，防止意外，还是上锁安全
@@ -759,9 +773,13 @@ func (rf *Raft) stateTransform(state int) {
 	case follower:
 		// 开启选举超时器
 		rf.electionTimer.Reset(GetRandomElectionTimeout())
+		rf.heartBeatTimer.Stop()
 	case candidate:
 		// 开启选举超时器
 		rf.electionTimer.Reset(GetRandomElectionTimeout())
+	case end:
+		rf.electionTimer.Stop()
+		rf.heartBeatTimer.Stop()
 	}
 }
 

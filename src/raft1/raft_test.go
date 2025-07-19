@@ -536,21 +536,28 @@ func TestBackup3B(t *testing.T) {
 
 	tester.AnnotateTest("TestBackup3B", servers)
 	ts.Begin("Test (3B): leader backs up quickly over incorrect follower logs")
+	timer := NewTimer()
 
 	ts.one(rand.Int(), servers, true)
 
 	// put leader and one follower in a partition
+	DPrintf("seg-----------------------")
+	timer.LogPhase("timer---------------------")
 	leader1 := ts.checkOneLeader()
 	ts.g.DisconnectAll((leader1 + 2) % servers)
 	ts.g.DisconnectAll((leader1 + 3) % servers)
 	ts.g.DisconnectAll((leader1 + 4) % servers)
 	tester.AnnotateConnection(ts.g.GetConnected())
+	DPrintf("seg------------------------,disconnect[%v, %v, %v]",leader1+2,leader1+3,leader1+4)
+	timer.LogPhase("timer---------------------")
 
 	// submit lots of commands that won't commit
 	start := tester.GetAnnotateTimestamp()
 	for i := 0; i < 50; i++ {
 		ts.srvs[leader1].Raft().Start(rand.Int())
 	}
+	DPrintf("------------------------------leader1:%v",leader1)
+	timer.LogPhase("timer---------------------")
 	text := fmt.Sprintf("submitted 50 commands to %v", leader1)
 	tester.AnnotateInfoInterval(start, text, text)
 
@@ -573,6 +580,8 @@ func TestBackup3B(t *testing.T) {
 	// now another partitioned leader and one follower
 	leader2 := ts.checkOneLeader()
 	other := (leader1 + 2) % servers
+	DPrintf("----------------------leader2:%v, others:%v", leader2, other)
+	timer.LogPhase("timer---------------------")
 	if leader2 == other {
 		other = (leader2 + 1) % servers
 	}
@@ -588,6 +597,7 @@ func TestBackup3B(t *testing.T) {
 	tester.AnnotateInfoInterval(start, text, text)
 
 	time.Sleep(RaftElectionTimeout / 2)
+	timer.LogPhase("timer---------------------")
 
 	// bring original leader back to life,
 	for i := 0; i < servers; i++ {
@@ -603,12 +613,14 @@ func TestBackup3B(t *testing.T) {
 		ts.one(rand.Int(), 3, true)
 	}
 
+	timer.LogPhase("timer---------------------")
 	// now everyone
 	for i := 0; i < servers; i++ {
 		ts.g.ConnectOne(i)
 	}
 	tester.AnnotateConnection(ts.g.GetConnected())
 	ts.one(rand.Int(), servers, true)
+	timer.LogPhase("timer---------------------")
 }
 
 func TestCount3B(t *testing.T) {
@@ -1059,6 +1071,14 @@ func TestFigure8Unreliable3C(t *testing.T) {
 		}
 	}
 	tester.AnnotateConnection(ts.g.GetConnected())
+
+	// DPrintf("-----------------------")
+	// for server := 0; server < servers; server++ {
+	// 	ts.srvs[server].Raft().Snapshot(0, nil)
+	// }
+	// DPrintf("-----------------------")
+	// time.Sleep(10*time.Second)
+	
 
 	ts.one(rand.Int()%10000, servers, true)
 }
