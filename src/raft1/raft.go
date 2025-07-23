@@ -63,6 +63,17 @@ func GetStableHeartBeatTimeout() time.Duration {
 type LogEntry struct {
 	Term    int         // entry commit的term
 	Command interface{} // 指令，任意数据
+	Index   int         // 当前log的index(lab3D)
+}
+
+// 获取0号元素
+func (rf *Raft) getFirstLog() LogEntry {
+	return rf.log[0]
+}
+
+// 获取last元素
+func (rf *Raft) getLastLog() LogEntry {
+	return rf.log[len(rf.log)-1]
 }
 
 // A Go object implementing a single Raft peer.
@@ -89,6 +100,7 @@ type Raft struct {
 	matchIdx []int // 对于follower i match[i]是为了提高效率而存在的，nextIdx发送的消息收到确认后再进行更新，悲观确认，可以作为commit的依据
 
 	// 自定义属性
+
 	state          int                   // 当前的一个状态leader,follower,candidate
 	electionTimer  *time.Timer           // 选举用的
 	heartBeatTimer *time.Timer           // leader定时给其他节点发送心跳用的
@@ -109,6 +121,16 @@ func (rf *Raft) GetState() (int, bool) {
 	defer rf.mu.RUnlock()
 
 	return rf.currentTerm, rf.state == leader
+}
+
+// 获取节点持久化状态序列化
+func (rf *Raft) getRaftStateBytes() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	return w.Bytes()
 }
 
 // save Raft's persistent state to stable storage,
@@ -134,13 +156,7 @@ func (rf *Raft) persist() {
 	// rf.mu.RLock()
 	// defer rf.mu.RUnlock()
 
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
-	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+	rf.persister.Save(rf.getRaftStateBytes(), nil)
 }
 
 // restore previously persisted state.
@@ -176,6 +192,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.currentTerm = currentTerm
 	rf.votedFor = votedFor
 	rf.log = log
+	rf.commitIdx = rf.getFirstLog().Index
+	rf.lastApplied = rf.getFirstLog().Index
 	DPrintf("Recovery curNode:%v rf.log[%v]", rf.me, rf.log)
 }
 
@@ -190,9 +208,49 @@ func (rf *Raft) PersistBytes() int {
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
+//
+// 该函数只有在log apply的时候才会进行提交，根据提交的idx，每interval进行一次snapshot
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	// note: snapshot是直接传进来的，正常情况持久化的话，应该将index前的部分copy-on-write
+	curFirstLogIdx := rf.getFirstLog().Index
+
+	// note:可能会接收leader的snapshot，curFirstLogIdx可能>=index
+	if index <= curFirstLogIdx {
+		DPrintf("Snapshot Reject: node:%v index:%v firstLogIdx:%v lastLogIdx:%v", rf.me, index, curFirstLogIdx, rf.getLastLog().Index)
+		return
+	}
+
+	// todo: go里切片底层数据不变，如果想把之前的数据进行回收应该直接进行copy
+	rf.log = rf.log[index-curFirstLogIdx:]
+	rf.persister.Save(rf.getRaftStateBytes(), snapshot)
+}
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+	// Offset            int  // byte offset where chunk is positioned in the snapshot file
+	// Done              bool // true if this is the last chunk
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+// 日志snapshot同步
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
 }
 
 // example RequestVote RPC arguments structure.
@@ -228,6 +286,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}()
 	// rf.electionTimer.Reset(GetRandomElectionTimeout())
 	// voteFor和term绑定，第二个条件隐含了不论之前选举的时候voteFor给了谁，只关注当前的term期间的voteFor
+	// 第二个条件防止丢包问题
 	if args.Term < rf.currentTerm || args.Term == rf.currentTerm && !(rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		// 拒绝投票
 		reply.Term, reply.VoteGranted = rf.currentTerm, false
@@ -257,8 +316,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) isUpToDateLog(lastLogIdx int, lastLogTerm int) bool {
-	rfLastLogIdx := len(rf.log) - 1
-	rfLastLogTerm := rf.log[rfLastLogIdx].Term
+	rfLastLogIdx := rf.getLastLog().Index
+	rfLastLogTerm := rf.getLastLog().Term
 	return lastLogTerm > rfLastLogTerm || lastLogTerm == rfLastLogTerm && lastLogIdx >= rfLastLogIdx
 }
 
@@ -306,7 +365,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term         int  // follower的term，如果leader和follower之间对不上，从旧leader变成follower
 	Success      bool // 是否可以添加成功
-	ConflictIdx  int  // 日志冲突点
+	ConflictIdx  int  // 日志冲突点，(matchIdx->nextIdx)
 	ConflictTerm int  // 日志冲突点的Term
 }
 
@@ -322,7 +381,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			} else if len(args.Entries) > 0 {
 				// commit信息补充
 				Record(fmt.Sprintf(NodeTag, rf.me), AEAccessDesc,
-					fmt.Sprintf("AE Access:当前节点%v 当前leader:%v 提交点%v 日志长度%v", rf.me, args.LeaderId, rf.commitIdx, len(rf.log)-1))
+					fmt.Sprintf("AE Access:当前节点%v 当前leader:%v 提交点%v 日志长度%v", rf.me, args.LeaderId, rf.commitIdx, rf.getLastLog().Index))
 			}
 		}
 	}()
@@ -349,18 +408,32 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 2.follower和leader日志冲突，需要进行覆盖问题
 
 	// args.preLogIdx比当前log长度长 或者 preLogIdx点上两者的term不一致，则返回false
-	if curLogLastIdx := len(rf.log) - 1; curLogLastIdx < args.PrevLogIdx || rf.log[args.PrevLogIdx].Term != args.PreLogTerm {
-		if curLogLastIdx < args.PrevLogIdx {
-			reply.ConflictIdx, reply.ConflictTerm = curLogLastIdx, rf.log[curLogLastIdx].Term
-		} else if rf.log[args.PrevLogIdx].Term != args.PreLogTerm {
+	curLogLastLog, curFirstLog := rf.getLastLog(), rf.getFirstLog()
+	// todo：现在应该还需要加一个agrs.prelogidx>firstlogidx的判定，或者在snapshot那一步保证这一点？
+	if curLogLastLog.Index < args.PrevLogIdx || rf.log[args.PrevLogIdx-curFirstLog.Index].Term != args.PreLogTerm {
+		if curLogLastLog.Index < args.PrevLogIdx {
+			reply.ConflictIdx, reply.ConflictTerm = curLogLastLog.Index, curLogLastLog.Term
+		} else if rf.log[args.PrevLogIdx-curFirstLog.Index].Term != args.PreLogTerm {
 			// 为了防止极端情况陷入的死循环，所以需要保证冲突点的日志term<=args.Term
 			// todo 这里得特别注意一下i=0的边界情况
-			for i := args.PrevLogIdx; i >= 0; i-- {
-				if rf.log[i].Term <= args.PreLogTerm {
-					reply.ConflictIdx, reply.ConflictTerm = i, rf.log[i].Term
-					break
-				}
+			// todo 我的conflictidx不是nextIdx，所以他是可能出现-1的情况的，rf.log[relocationIdx]会有问题
+			// note:之前【重定位】点采用的是matchIdx，因为0号log是最后的兜底方案，relocationIdx>=0，但是lab3D中，就有可能=-1
+			// note::但是因为follower的日志进度永远落后于leader，所以冲突点发生的地方因为不会出现relocationIdx=-1的情况
+			// note:agrs.prelogidx<=firstlogidx的情况不会出现，因为firsLogIdx一定是已经commit的log，而这段逻辑是找不同
+			relocationIdx := args.PrevLogIdx - curFirstLog.Index
+			for relocationIdx >= 0 && rf.log[relocationIdx].Term > args.PreLogTerm {
+				relocationIdx--
 			}
+			// 除了直接给log用的，其他都需要进行再处理
+			DPrintf("relocate node:%v args:%v relocationIdx:%v rf.log:%v", rf.me, args, relocationIdx, rf.log)
+			reply.ConflictIdx, reply.ConflictTerm = relocationIdx+curFirstLog.Index, rf.log[relocationIdx].Term
+			// 下面这个没有版本定位到i=-1的情况
+			// for i := args.PrevLogIdx - curFirstLog.Index; i >= 0; i-- {
+			// 	if rf.log[i].Term <= args.PreLogTerm {
+			// 		reply.ConflictIdx, reply.ConflictTerm = i, rf.log[i].Term
+			// 		break
+			// 	}
+			// }
 		}
 
 		reply.Term, reply.Success = rf.currentTerm, false
@@ -370,8 +443,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 开始进行同步
 	// 如果是空包就没必要浪费时间再复制一份了
 	// 【日志同步】负责复制日志，心跳负责提交日志
+	// todo: args.prelogidx比0号日志更小的情况是否需要考虑
 	if len(args.Entries) > 0 {
-		rf.log = append(rf.log[0:args.PrevLogIdx+1], args.Entries...)
+		rf.log = append(rf.log[0:args.PrevLogIdx-curFirstLog.Index+1], args.Entries...)
 		rf.persist()
 		DPrintf("节点%v log rep ", rf.me)
 	} else if len(args.Entries) == 0 && min(args.LeaderCommit, args.PrevLogIdx) > rf.commitIdx {
@@ -419,16 +493,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 
-	index := len(rf.log)
+	index := rf.getLastLog().Index + 1
 	term := rf.currentTerm
 	isLeader := rf.state == leader
 
 	// note:在rf.log中添加新日志，并且广播出去
-	newLog := LogEntry{Command: command, Term: term}
+	newLog := LogEntry{Command: command, Term: term, Index: index}
 	rf.log = append(rf.log, newLog)
 	rf.persist()
 	// 更新自己的matchIdx方便逻辑处理
-	rf.matchIdx[rf.me] = len(rf.log) - 1
+	rf.matchIdx[rf.me] = index
 	go rf.sendHeartBeat(false)
 	// DPrintf("start")
 
@@ -481,19 +555,22 @@ func (rf *Raft) sendHeartBeat(isHeartBeat bool) {
 
 // 生成AE，加锁的事情自己外面保证
 func (rf *Raft) generateAppendEntriesArgs(server int, isHeartBeat bool) *AppendEntriesArgs {
+	// todo: 再看看怎么修改合适
+	// preLogIdx是不考虑截断的idx, preLogActualIdx是给log索引用的
 	preLogIdx := rf.nextIdx[server] - 1
+	preLogIdxForLog := preLogIdx - rf.getFirstLog().Index
 	// 执行深拷贝，是为了防止log发生扩容而产生的线程安全问题
 	entries := []LogEntry{}
 	if !isHeartBeat {
-		entries = make([]LogEntry, len(rf.log[preLogIdx+1:]))
-		copy(entries, rf.log[preLogIdx+1:])
+		entries = make([]LogEntry, len(rf.log[preLogIdxForLog+1:]))
+		copy(entries, rf.log[preLogIdxForLog+1:])
 	}
 
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIdx:   preLogIdx,
-		PreLogTerm:   rf.log[preLogIdx].Term,
+		PreLogTerm:   rf.log[preLogIdxForLog].Term,
 		LeaderCommit: rf.commitIdx,
 		Entries:      entries,
 	}
@@ -506,6 +583,11 @@ func (rf *Raft) syncLogOnce(server int, isHeartBeat bool) {
 
 	if rf.state != leader {
 		// 为了解决非原子性的问题，外部逻辑判断再发送消息，并非原子的所以需要有这一段
+		rf.mu.RUnlock()
+		return
+	}
+	// todo 这里可能需要加入判断，关于rf.nextIdx，决定是否发送snapshot
+	if rf.nextIdx[server] <= rf.getFirstLog().Index {
 		rf.mu.RUnlock()
 		return
 	}
@@ -531,17 +613,20 @@ func (rf *Raft) syncLogOnce(server int, isHeartBeat bool) {
 				} else {
 					// 开始着手解决日志冲突的问题
 					// 从conflict点出发，知道碰见第一个<=conflictTerm的log
-					for i := reply.ConflictIdx; i >= 0; i-- {
-						if rf.log[i].Term <= reply.ConflictTerm {
-							// 如果rf.log[reply.ConflictIdx].Term <= reply.ConflictTerm，就会陷入无限死循环
-							// 理论上不会出现上面说的，因为term大的才能选举成功，但是极端环境下还是会出现的
-							// 假如旧leader的日志没有复制过去，并且正好断联了，新leader上任后又重联了，就会出现上面的问题
-							rf.nextIdx[server] = i + 1
-							DPrintf("AE Conflict leader端 follower:%v nextidx:%v", server, i+1)
-							break
-						}
-
+					relocationIdx := reply.ConflictIdx - rf.getFirstLog().Index
+					for relocationIdx >= 0 && rf.log[relocationIdx].Term > reply.ConflictTerm {
+						// 如果只有rf.log[reply.ConflictIdx].Term <= reply.ConflictTerm，就会陷入无限死循环
+						// 理论上不会出现上面说的，因为term大的才能选举成功，但是极端环境下还是会出现的
+						// 假如旧leader的日志没有复制过去，并且正好断联了，新leader上任后又重联了，就会出现上面的问题
+						relocationIdx--
 					}
+					// for ; relocationIdx >= 0; relocationIdx-- {
+					// 	if rf.log[relocationIdx].Term <= reply.ConflictTerm {
+					// 		break
+					// 	}
+					// }
+					rf.nextIdx[server] = relocationIdx + rf.getFirstLog().Index + 1
+					DPrintf("AE Conflict leader端 follower:%v nextidx:%v relocationIdx:%v", server, rf.nextIdx[server], relocationIdx)
 				}
 			} else if len(args.Entries) > 0 {
 				// 增加if 对于心跳逻辑没必要单独多做其他方面的判断(心跳本身就是没有冲突的表示，就算回来的rpc丢了也不会有没同步的问题，下次依然会带着log发过去)
@@ -568,7 +653,8 @@ func (rf *Raft) commitAndApply() {
 	// 日志过半复制点，进行commit，并唤醒apply
 	// 为了防止奇怪的错误，leader只能间接提交其他term内的日志(论文5.4)
 	overHalfReplicatedIdx := matchIdx[len(rf.peers)/2]
-	if overHalfReplicatedIdx > rf.commitIdx && rf.log[overHalfReplicatedIdx].Term == rf.currentTerm {
+	// note:为了确保overHalfReplicatedIdx>rf.getFirstLog().Index，每次snapshot还有leaderInit的时候都需要设置rf.commitIdx=rf.getFirstLog().Index
+	if overHalfReplicatedIdx > rf.commitIdx && rf.log[overHalfReplicatedIdx-rf.getFirstLog().Index].Term == rf.currentTerm {
 		rf.commitIdx = overHalfReplicatedIdx
 		rf.applyChanCond.Signal()
 		Record(LogCommitTag, fmt.Sprintf(LogCommitDesc, overHalfReplicatedIdx),
@@ -579,9 +665,10 @@ func (rf *Raft) commitAndApply() {
 // 判断当前是否应该同步leader和follower[server]之间的日志差异
 func (rf *Raft) isLogSync(server int) bool {
 	// note:加锁和比较日志逻辑
+	// note:进行日志差异判定通过nextIdx而不是matchIdx，是因为【同步日志】是根据nextIdx发送的,但用matchIdx也行
 	rf.mu.RLock()
 	defer rf.mu.RUnlock()
-	return rf.state == leader && rf.nextIdx[server] == len(rf.log)
+	return rf.state == leader && rf.nextIdx[server] == rf.getLastLog().Index+1
 }
 
 // 心跳和日志复制的底层机制
@@ -616,25 +703,29 @@ func (rf *Raft) applier() {
 		// todo：这里有一个写操作，理论上应该加写锁
 		// 保证可见性
 
+		// todo: 这里需要格外注意lastapplied的值，不能小于第一个日志的idx
+		// note: lab3D中如果installSnapshot和apply同时进行，就可能发生错误(逻辑和程序上的都有)
+
 		rf.lastApplied++
 		applyMsg := raftapi.ApplyMsg{
 			CommandValid: true,
-			Command:      rf.log[rf.lastApplied].Command,
+			Command:      rf.log[rf.lastApplied-rf.getFirstLog().Index].Command,
 			CommandIndex: rf.lastApplied,
 		}
 
 		rf.mu.RUnlock()
 
 		rf.applyChan <- applyMsg
-		DPrintf("Log Apply 当前节点:%v applyLogTerm:%v applyLogIdx:%v ", rf.me, rf.log[rf.lastApplied].Term, applyMsg.CommandIndex)
+		DPrintf("Log Apply 当前节点:%v applyLogTerm:%v applyLogIdx:%v ", rf.me, rf.log[rf.lastApplied-rf.getFirstLog().Index].Term, applyMsg.CommandIndex)
 	}
 }
 
 // leader上任成功后，需要进行一些参数的初始化
 func (rf *Raft) initLeaderParms() {
 	for server := range rf.peers {
-		rf.nextIdx[server] = len(rf.log)
-		rf.matchIdx[server] = 0
+		rf.nextIdx[server] = rf.getLastLog().Index + 1
+		// todo:这里可能需要再思考一下？
+		rf.matchIdx[server] = rf.getFirstLog().Index
 	}
 }
 
@@ -649,8 +740,8 @@ func (rf *Raft) startElection() {
 	args := &RequestVoteArgs{
 		Term:        rf.currentTerm,
 		CandidateId: rf.me,
-		LastLogIdx:  len(rf.log) - 1,
-		LastLogTerm: rf.log[len(rf.log)-1].Term,
+		LastLogIdx:  rf.getLastLog().Index,
+		LastLogTerm: rf.getLastLog().Term,
 	}
 
 	// 进入选举状态开始选举
@@ -681,7 +772,7 @@ func (rf *Raft) startElection() {
 
 							Record(ElectionTag,
 								fmt.Sprintf(ElectionResDesc, rf.me),
-								fmt.Sprintf("Election success 节点%v选举成功 当前term:%v lastLog[idx:%v,term:%v]", rf.me, rf.currentTerm, len(rf.log)-1, rf.log[len(rf.log)-1].Term))
+								fmt.Sprintf("Election success 节点%v选举成功 当前term:%v lastLog[%v]", rf.me, rf.currentTerm, rf.getLastLog()))
 
 							rf.stateTransform(leader)
 							rf.initLeaderParms()

@@ -143,6 +143,7 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 
 			rs.lastApplied = m.CommandIndex
 
+			// 每SnapShotInterval做一次快照
 			if (m.CommandIndex+1)%SnapShotInterval == 0 {
 				w := new(bytes.Buffer)
 				e := labgob.NewEncoder(w)
@@ -173,6 +174,8 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 }
 
 // returns "" or error string
+//
+// 将snapshot整合进行当前的rs.logs
 func (rs *rfsrv) ingestSnap(snapshot []byte, index int) string {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
