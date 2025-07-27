@@ -112,7 +112,7 @@ type Raft struct {
 	heartBeatTimer  *time.Timer           // leader定时给其他节点发送心跳用的
 	applyChan       chan raftapi.ApplyMsg // 给外部将已commit日志进行apply的
 	applyChanFilter chan raftapi.ApplyMsg // 所有的applyMsg先走这个channel进行一次过滤
-	replicatorCond  []*sync.Cond          // 用来唤醒同步日志的底层机制
+	replicatorChan  []chan interface{}    // 用来唤醒同步日志的底层机制
 	applyChanCond   *sync.Cond            // 用于进行commit和apply的逻辑
 }
 
@@ -597,7 +597,11 @@ func (rf *Raft) sendHeartBeat(isHeartBeat bool) {
 			go rf.syncLogOnce(server, true)
 		}
 		// DPrintf("heart signal 唤醒%v ",server)
-		rf.replicatorCond[server].Signal()
+		// 用chan替换cond，非阻塞式发送
+		select {
+		case rf.replicatorChan[server] <- struct{}{}:
+		default:
+		}
 	}
 
 }
@@ -758,14 +762,14 @@ func (rf *Raft) syncLogOrNot(server int) bool {
 
 // 心跳和日志复制的底层机制
 func (rf *Raft) replicator(server int) {
-	rf.replicatorCond[server].L.Lock()
-	defer rf.replicatorCond[server].L.Unlock()
 
 	for rf.killed() == false {
 		// 被kill以后状态会变，不会发送，就算有意外情况也最多发一次
 		for !rf.syncLogOrNot(server) {
 			DPrintf("Replicator Signal server:%v rf.nextIdx[server]:%v", server, rf.nextIdx[server])
-			rf.replicatorCond[server].Wait()
+			select {
+			case <-rf.replicatorChan[server]:
+			}
 		}
 		// 进行同步检测，如果leader和follower之间日志不同步则通过for完成同步过程
 		// 同样也需要保证在这个过程中state=leader，需要保证旧leader能正常变成follower
@@ -1031,7 +1035,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		heartBeatTimer:  time.NewTimer(GetStableHeartBeatTimeout()),
 		applyChan:       applyCh,
 		applyChanFilter: make(chan raftapi.ApplyMsg, 100),
-		replicatorCond:  make([]*sync.Cond, len(peers)),
+		replicatorChan:  make([]chan interface{}, len(peers)),
 		applyChanCond:   sync.NewCond(&sync.Mutex{}),
 	}
 
@@ -1042,7 +1046,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	for server := range rf.peers {
 		if server != rf.me {
-			rf.replicatorCond[server] = sync.NewCond(&sync.Mutex{})
+			rf.replicatorChan[server] = make(chan interface{})
 			go rf.replicator(server)
 		}
 

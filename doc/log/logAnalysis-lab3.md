@@ -2675,6 +2675,20 @@ todo：现在应该还需要加一个agrs.prelogidx>firstlogidx的判定，或�
 
 ------------------------
 
+#### bug2
+Test (3D): snapshots basic (reliable network)...
+info: wrote visualization to /tmp/porcupine-206242511.html
+2025/07/27 21:38:06 apply error: server 0 apply out of order, expected index 20, got 10
+exit status 1
+FAIL    6.5840/raft1    1.585s
+
+------------------------------
+
+原因暂时不明确，感觉是碰到了极端情况，应该是apply日志的时候，发生了什么时序错误，可能需要在filter上做优化
+感觉是cmd和snapshot之间的问题导致的
+
+------------------------------
+
 ### 性能优化专题
 
 #### 优化点1——replicator判定问题
@@ -2705,7 +2719,10 @@ signal以后其实不保证真的肯定被调度，有时候甚至需要signal�
 但是即便是每次都进行signal，也没办法保证解决这个问题
 解决方案：
 1.不再区分【心跳】和【日志同步】
+        这个方案才是最优的，因为不管是cond还是chan，都没办法保证真的能唤醒一次就去执行，两者对比下来真的感觉差不多太多
+        这个方案在lab3-raft-opt分支上
 2.将cond变成channel，提高调度优先级
+        这个方案和cond本质上没有太大差别
 
 2025/07/27 16:22:56 randNumLog----------------------leader:1, crash:2
 2025/07/27 16:22:56 OPT Start node:1 time:2025-07-27 16:22:56.331
