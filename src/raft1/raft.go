@@ -87,26 +87,33 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+
 	// persistent state on all servers
+
 	currentTerm int        // 当前的term，理论上term应该和votedFor一起进行更新
 	votedFor    int        // 选举阶段投票给了谁，选举结束以后应该将信息抹除
 	log         []LogEntry // 用来记录当前log的日志信息的
+
 	// volatile state on all servers
+
 	commitIdx   int // 被过半节点commit的log
 	lastApplied int // state machine最后应用log的位置 <=commitIdx
+
 	// volitile state on leader
 	// match和next之间的区别主要在于对于随机波动的处理上
+
 	nextIdx  []int // 对于follower i nextIdx[i]是leader需要给其发送日志内容的部分，发送后直接进行一部分（需要做优化的地方）
 	matchIdx []int // 对于follower i match[i]是为了提高效率而存在的，nextIdx发送的消息收到确认后再进行更新，悲观确认，可以作为commit的依据
 
 	// 自定义属性
 
-	state          int                   // 当前的一个状态leader,follower,candidate
-	electionTimer  *time.Timer           // 选举用的
-	heartBeatTimer *time.Timer           // leader定时给其他节点发送心跳用的
-	applyChan      chan raftapi.ApplyMsg // 给外部将已commit日志进行apply的
-	replicatorCond []*sync.Cond          // 用来唤醒同步日志的底层机制
-	applyChanCond  *sync.Cond            // 用于进行commit和apply的逻辑
+	state           int                   // 当前的一个状态leader,follower,candidate
+	electionTimer   *time.Timer           // 选举用的
+	heartBeatTimer  *time.Timer           // leader定时给其他节点发送心跳用的
+	applyChan       chan raftapi.ApplyMsg // 给外部将已commit日志进行apply的
+	applyChanFilter chan raftapi.ApplyMsg // 所有的applyMsg先走这个channel进行一次过滤
+	replicatorCond  []*sync.Cond          // 用来唤醒同步日志的底层机制
+	applyChanCond   *sync.Cond            // 用于进行commit和apply的逻辑
 }
 
 // return currentTerm and whether this server
@@ -227,6 +234,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// todo: go里切片底层数据不变，如果想把之前的数据进行回收应该直接进行copy
 	rf.log = rf.log[index-curFirstLogIdx:]
 	rf.persister.Save(rf.getRaftStateBytes(), snapshot)
+	DPrintf("Snapshot node:%v index:%v", rf.me, index)
 }
 
 type InstallSnapshotArgs struct {
@@ -245,7 +253,32 @@ type InstallSnapshotReply struct {
 
 // 日志snapshot同步
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm, rf.votedFor = args.Term, -1
+		rf.stateTransform(follower)
+		rf.persist()
+	}
+
+	rf.electionTimer.Reset(GetRandomElectionTimeout())
+	DPrintf("Install Snapshot node:%v snapshotIdxAndTerm[%v, %v]", rf.me, args.LastIncludedIndex, args.LastIncludedTerm)
+
+	// note: 安装snapshot的事情，还是需要filter来完成，因为提交日志是多开了一个协程，还是有概率存在顺序不一致的问题
+	go func() {
+		rf.applyChanFilter <- raftapi.ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      args.Data,
+			SnapshotTerm:  args.LastIncludedTerm,
+			SnapshotIndex: args.LastIncludedIndex,
+		}
+	}()
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -381,7 +414,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			} else if len(args.Entries) > 0 {
 				// commit信息补充
 				Record(fmt.Sprintf(NodeTag, rf.me), AEAccessDesc,
-					fmt.Sprintf("AE Access:当前节点%v 当前leader:%v 提交点%v 日志长度%v", rf.me, args.LeaderId, rf.commitIdx, rf.getLastLog().Index))
+					fmt.Sprintf("AE Access:当前节点%v 当前leader:%v 提交点%v 日志长度%v 日志复制:%v", rf.me, args.LeaderId, rf.commitIdx, rf.getLastLog().Index, args.Entries))
 			}
 		}
 	}()
@@ -408,8 +441,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 2.follower和leader日志冲突，需要进行覆盖问题
 
 	// args.preLogIdx比当前log长度长 或者 preLogIdx点上两者的term不一致，则返回false
+	DPrintf("AE State node:%v firstLog:%v lastLog:%v args:%v", rf.me, rf.getFirstLog(), rf.getLastLog(), args)
 	curLogLastLog, curFirstLog := rf.getLastLog(), rf.getFirstLog()
+
 	// todo：现在应该还需要加一个agrs.prelogidx>firstlogidx的判定，或者在snapshot那一步保证这一点？
+	// note: 给lab3D单独追加的，没想到真的要加
+	if args.PrevLogIdx < curFirstLog.Index {
+		reply.Term, reply.Success, reply.ConflictIdx, reply.ConflictTerm = rf.currentTerm, false, curLogLastLog.Index, curLogLastLog.Term
+		return
+	}
+
 	if curLogLastLog.Index < args.PrevLogIdx || rf.log[args.PrevLogIdx-curFirstLog.Index].Term != args.PreLogTerm {
 		if curLogLastLog.Index < args.PrevLogIdx {
 			reply.ConflictIdx, reply.ConflictTerm = curLogLastLog.Index, curLogLastLog.Term
@@ -446,20 +487,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// todo: args.prelogidx比0号日志更小的情况是否需要考虑
 	if len(args.Entries) > 0 {
 		rf.log = append(rf.log[0:args.PrevLogIdx-curFirstLog.Index+1], args.Entries...)
+		// todo:这里其实也可以加入日志提交逻辑，不是非得让heartbeat进行提交
 		rf.persist()
 		DPrintf("节点%v log rep ", rf.me)
-	} else if len(args.Entries) == 0 && min(args.LeaderCommit, args.PrevLogIdx) > rf.commitIdx {
-		rf.commitIdx = min(args.LeaderCommit, args.PrevLogIdx)
-		DPrintf("node:%v commitidx:%v", rf.me, rf.commitIdx)
-		rf.applyChanCond.Signal()
 	}
+	// else if len(args.Entries) == 0 && min(args.LeaderCommit, args.PrevLogIdx) > rf.commitIdx {
+	// 	rf.commitIdx = min(args.LeaderCommit, args.PrevLogIdx)
+	// 	DPrintf("node:%v commitidx:%v", rf.me, rf.commitIdx)
+	// 	rf.applyChanCond.Signal()
+	// }
 
 	// commit逻辑
 	// 为了兼容心跳空包逻辑，如果是心跳的话，就不能commit，只有日志同步的时候才能触发 commit
-	// if args.LeaderCommit > rf.commitIdx {
-	// 	rf.commitIdx = min(args.LeaderCommit, len(rf.log)-1)
-	// 	rf.applyChanCond.Signal()
-	// }
+	if min(args.LeaderCommit, args.PrevLogIdx+len(args.Entries)) > rf.commitIdx {
+		rf.commitIdx = min(args.LeaderCommit, args.PrevLogIdx+len(args.Entries))
+		rf.applyChanCond.Signal()
+	}
 
 	reply.Term, reply.Success = rf.currentTerm, true
 }
@@ -484,6 +527,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 //
 // return index, term, isLeader
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	DPrintf("OPT Start node:%v time:%v", rf.me, time.Now().Format("2006-01-02 15:04:05.000"))
 	// Your code here (3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -525,6 +569,10 @@ func (rf *Raft) Kill() {
 	defer rf.mu.Unlock()
 	rf.stateTransform(end)
 	atomic.StoreInt32(&rf.dead, 1)
+
+	go func() {
+		rf.applyChanFilter <- raftapi.ApplyMsg{}
+	}()
 	// Your code here, if desired.
 }
 
@@ -536,13 +584,14 @@ func (rf *Raft) killed() bool {
 // 发送心跳和日志复制
 func (rf *Raft) sendHeartBeat(isHeartBeat bool) {
 	// note:现在是lab3B了，需要对这段逻辑进行大改
+	DPrintf("OPT HeartBeat(:%v) node:%v time:%v", isHeartBeat, rf.me, time.Now().Format("2006-01-02 15:04:05.000"))
 	for server := range rf.peers {
 		if server == rf.me {
 			continue
 		}
 
 		if !isHeartBeat {
-
+			// rf.replicatorCond[server].Signal()
 		} else {
 			// DPrintf("leader开始发送心跳")
 			go rf.syncLogOnce(server, true)
@@ -551,6 +600,18 @@ func (rf *Raft) sendHeartBeat(isHeartBeat bool) {
 		rf.replicatorCond[server].Signal()
 	}
 
+}
+
+// 生成snapshot
+func (rf *Raft) generateInstallSnapshotArgs(server int) *InstallSnapshotArgs {
+	args := &InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.getFirstLog().Index,
+		LastIncludedTerm:  rf.getFirstLog().Term,
+		Data:              rf.persister.ReadSnapshot(),
+	}
+	return args
 }
 
 // 生成AE，加锁的事情自己外面保证
@@ -588,7 +649,28 @@ func (rf *Raft) syncLogOnce(server int, isHeartBeat bool) {
 	}
 	// todo 这里可能需要加入判断，关于rf.nextIdx，决定是否发送snapshot
 	if rf.nextIdx[server] <= rf.getFirstLog().Index {
+		args := rf.generateInstallSnapshotArgs(server)
 		rf.mu.RUnlock()
+
+		reply := &InstallSnapshotReply{}
+		if rf.sendInstallSnapshot(server, args, reply) {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+
+			if args.Term == rf.currentTerm && rf.state == leader {
+				if reply.Term > rf.currentTerm {
+					rf.stateTransform(follower)
+					rf.currentTerm, rf.votedFor = reply.Term, -1
+					rf.persist()
+				} else {
+					// 这里的逻辑和同步日志返回消息是一样的
+					rf.matchIdx[server] = args.LastIncludedIndex
+					rf.nextIdx[server] = rf.matchIdx[server] + 1
+					rf.commitAndApply()
+				}
+			}
+		}
+
 		return
 	}
 
@@ -659,16 +741,19 @@ func (rf *Raft) commitAndApply() {
 		rf.applyChanCond.Signal()
 		Record(LogCommitTag, fmt.Sprintf(LogCommitDesc, overHalfReplicatedIdx),
 			fmt.Sprintf("Log Commit 当前leader:%v commitIdx:%v", rf.me, rf.commitIdx))
+		DPrintf("OPT leaderEnd logCommit point:%v", rf.commitIdx)
+		// note:针对ts.one的优化操作
+		go rf.sendHeartBeat(true)
 	}
 }
 
 // 判断当前是否应该同步leader和follower[server]之间的日志差异
-func (rf *Raft) isLogSync(server int) bool {
+func (rf *Raft) syncLogOrNot(server int) bool {
 	// note:加锁和比较日志逻辑
 	// note:进行日志差异判定通过nextIdx而不是matchIdx，是因为【同步日志】是根据nextIdx发送的,但用matchIdx也行
 	rf.mu.RLock()
 	defer rf.mu.RUnlock()
-	return rf.state == leader && rf.nextIdx[server] == rf.getLastLog().Index+1
+	return rf.state == leader && rf.nextIdx[server] != rf.getLastLog().Index+1
 }
 
 // 心跳和日志复制的底层机制
@@ -678,45 +763,86 @@ func (rf *Raft) replicator(server int) {
 
 	for rf.killed() == false {
 		// 被kill以后状态会变，不会发送，就算有意外情况也最多发一次
-		for rf.isLogSync(server) {
+		for !rf.syncLogOrNot(server) {
+			DPrintf("Replicator Signal server:%v rf.nextIdx[server]:%v", server, rf.nextIdx[server])
 			rf.replicatorCond[server].Wait()
 		}
 		// 进行同步检测，如果leader和follower之间日志不同步则通过for完成同步过程
 		// 同样也需要保证在这个过程中state=leader，需要保证旧leader能正常变成follower
 		// note：判断和发送不是原子的，所以可能会出现一定的线程安全问题
+
+		DPrintf("OPT SyncPre node:%v server:%v time:%v", rf.me, server, time.Now().Format("2006-01-02 15:04:05.000"))
 		rf.syncLogOnce(server, false)
+		DPrintf("OPT SyncAfter node:%v server:%v time:%v", rf.me, server, time.Now().Format("2006-01-02 15:04:05.000"))
 	}
 }
 
 // 当有日志被提交的时候，应该将其应用到rf.applyChan
 func (rf *Raft) applier() {
-	rf.applyChanCond.L.Lock()
-	defer rf.applyChanCond.L.Unlock()
-
+	// 改成异步提交(日志小，并发高)
 	for rf.killed() == false {
+		rf.mu.Lock()
 		for rf.commitIdx <= rf.lastApplied {
 			rf.applyChanCond.Wait()
 		}
-
-		// 唤醒后开始进行commit逻辑
-		rf.mu.RLock()
-		// todo：这里有一个写操作，理论上应该加写锁
-		// 保证可见性
-
 		// todo: 这里需要格外注意lastapplied的值，不能小于第一个日志的idx
 		// note: lab3D中如果installSnapshot和apply同时进行，就可能发生错误(逻辑和程序上的都有)
 
-		rf.lastApplied++
-		applyMsg := raftapi.ApplyMsg{
-			CommandValid: true,
-			Command:      rf.log[rf.lastApplied-rf.getFirstLog().Index].Command,
-			CommandIndex: rf.lastApplied,
+		entries := make([]LogEntry, rf.commitIdx-rf.lastApplied)
+		copy(entries, rf.log[rf.lastApplied-rf.getFirstLog().Index+1:rf.commitIdx-rf.getFirstLog().Index+1])
+		// note:直接更新，不过这里确实需要特别注意时间差异的问题
+		rf.lastApplied = rf.commitIdx
+
+		rf.mu.Unlock()
+
+		// 异步提交到filter
+		for i := range entries {
+			rf.applyChanFilter <- raftapi.ApplyMsg{
+				CommandValid: true,
+				Command:      entries[i].Command,
+				CommandIndex: entries[i].Index,
+			}
 		}
+		DPrintf("Log Apply 当前节点:%v apply entries:%v", rf.me, entries)
+		DPrintf("OPT Apply node:%v time:%v", rf.me, time.Now().Format("2006-01-02 15:04:05.000"))
+	}
+}
 
-		rf.mu.RUnlock()
+// 所有applyMsg都要走这里，满足条件的才真正apply
+func (rf *Raft) applyMsgFilter() {
+	for msg := range rf.applyChanFilter {
 
-		rf.applyChan <- applyMsg
-		DPrintf("Log Apply 当前节点:%v applyLogTerm:%v applyLogIdx:%v ", rf.me, rf.log[rf.lastApplied-rf.getFirstLog().Index].Term, applyMsg.CommandIndex)
+		if msg.SnapshotValid {
+			// 不在cmdMsg能进行提交的情况下install snapshot
+			rf.mu.Lock()
+			if msg.SnapshotIndex <= rf.commitIdx {
+				// note: 对于snapshot的提交需要格外当心，因为这个和msg的提交一直都是冲突的
+				// note: snapshot一旦提交了，相当于刷新了上层状态机的状态，snapshotIdx后面的日志其实是需要重新进行提交的
+				// note: 但是如果在cmdMsg那做操作相当不友好
+				rf.mu.Unlock()
+				continue
+			}
+
+			newLog := make([]LogEntry, 1)
+			newLog[0].Index, newLog[0].Term = msg.SnapshotIndex, msg.SnapshotTerm
+			if rf.getLastLog().Index > msg.SnapshotIndex {
+				newLog = append(newLog, rf.log[msg.CommandIndex+1:]...)
+			}
+
+			rf.log = newLog
+			rf.lastApplied = msg.SnapshotIndex
+			rf.commitIdx = msg.SnapshotIndex
+			rf.persister.Save(rf.getRaftStateBytes(), msg.Snapshot)
+
+			rf.mu.Unlock()
+
+			rf.applyChan <- msg
+		} else if msg.CommandValid {
+			// msg直接进行提交即可
+			rf.applyChan <- msg
+		} else if rf.killed() {
+			return
+		}
 	}
 }
 
@@ -725,7 +851,7 @@ func (rf *Raft) initLeaderParms() {
 	for server := range rf.peers {
 		rf.nextIdx[server] = rf.getLastLog().Index + 1
 		// todo:这里可能需要再思考一下？
-		rf.matchIdx[server] = rf.getFirstLog().Index
+		// rf.matchIdx[server] = rf.getFirstLog().Index
 	}
 }
 
@@ -888,24 +1014,25 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// 这段已经表明了，server端固定了所有的client并且会将通讯方式传进来，这些初始状态参数不太需要修改
 	// 初始化的时候就需要开始后台线程来进行选举的工作
 	rf := &Raft{
-		mu:             sync.RWMutex{},
-		peers:          peers,
-		persister:      persister,
-		me:             me,
-		dead:           0,
-		currentTerm:    0,
-		votedFor:       -1,
-		log:            make([]LogEntry, 1),
-		commitIdx:      0,
-		lastApplied:    0,
-		nextIdx:        make([]int, len(peers)),
-		matchIdx:       make([]int, len(peers)),
-		state:          follower,
-		electionTimer:  time.NewTimer(GetRandomElectionTimeout()),
-		heartBeatTimer: time.NewTimer(GetStableHeartBeatTimeout()),
-		applyChan:      applyCh,
-		replicatorCond: make([]*sync.Cond, len(peers)),
-		applyChanCond:  sync.NewCond(&sync.Mutex{}),
+		mu:              sync.RWMutex{},
+		peers:           peers,
+		persister:       persister,
+		me:              me,
+		dead:            0,
+		currentTerm:     0,
+		votedFor:        -1,
+		log:             make([]LogEntry, 1),
+		commitIdx:       0,
+		lastApplied:     0,
+		nextIdx:         make([]int, len(peers)),
+		matchIdx:        make([]int, len(peers)),
+		state:           follower,
+		electionTimer:   time.NewTimer(GetRandomElectionTimeout()),
+		heartBeatTimer:  time.NewTimer(GetStableHeartBeatTimeout()),
+		applyChan:       applyCh,
+		applyChanFilter: make(chan raftapi.ApplyMsg, 100),
+		replicatorCond:  make([]*sync.Cond, len(peers)),
+		applyChanCond:   sync.NewCond(&sync.Mutex{}),
 	}
 
 	// Your initialization code here (3A, 3B, 3C).
@@ -920,9 +1047,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		}
 
 	}
+	rf.applyChanCond = sync.NewCond(&rf.mu)
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.applier()
+	go rf.applyMsgFilter()
 
 	return rf
 }

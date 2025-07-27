@@ -51,7 +51,7 @@ const (
 )
 
 type ExecutionTimer struct {
-	start    time.Time
+	start time.Time
 	// messages []string
 }
 
@@ -63,7 +63,9 @@ func NewTimer() *ExecutionTimer {
 }
 
 func (t *ExecutionTimer) LogPhase(format string, a ...interface{}) {
-	elapsed := time.Since(t.start)
-	log.Printf("msg:%v time:%v", fmt.Sprintf(format, a...), elapsed)
-	// t.messages = append(t.messages, fmt.Sprintf("[%s] %v", phase, elapsed))
+	if Debug {
+		elapsed := time.Since(t.start)
+		log.Printf("msg:%v time:%v", fmt.Sprintf(format, a...), elapsed)
+		// t.messages = append(t.messages, fmt.Sprintf("[%s] %v", phase, elapsed))
+	}
 }

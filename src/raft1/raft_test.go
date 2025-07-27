@@ -548,7 +548,7 @@ func TestBackup3B(t *testing.T) {
 	ts.g.DisconnectAll((leader1 + 3) % servers)
 	ts.g.DisconnectAll((leader1 + 4) % servers)
 	tester.AnnotateConnection(ts.g.GetConnected())
-	DPrintf("seg------------------------,disconnect[%v, %v, %v]",leader1+2,leader1+3,leader1+4)
+	DPrintf("seg------------------------,disconnect[%v, %v, %v]", leader1+2, leader1+3, leader1+4)
 	timer.LogPhase("timer---------------------")
 
 	// submit lots of commands that won't commit
@@ -556,7 +556,7 @@ func TestBackup3B(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		ts.srvs[leader1].Raft().Start(rand.Int())
 	}
-	DPrintf("------------------------------leader1:%v",leader1)
+	DPrintf("------------------------------leader1:%v", leader1)
 	timer.LogPhase("timer---------------------")
 	text := fmt.Sprintf("submitted 50 commands to %v", leader1)
 	tester.AnnotateInfoInterval(start, text, text)
@@ -621,6 +621,7 @@ func TestBackup3B(t *testing.T) {
 	tester.AnnotateConnection(ts.g.GetConnected())
 	ts.one(rand.Int(), servers, true)
 	timer.LogPhase("timer---------------------")
+	// log.Fatal("just for debug")
 }
 
 func TestCount3B(t *testing.T) {
@@ -1078,7 +1079,6 @@ func TestFigure8Unreliable3C(t *testing.T) {
 	// }
 	// DPrintf("-----------------------")
 	// time.Sleep(10*time.Second)
-	
 
 	ts.one(rand.Int()%10000, servers, true)
 }
@@ -1273,6 +1273,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		victim := (leader1 + 1) % servers
 		sender := leader1
 		if i%3 == 1 {
+			// 没3个iter换leader崩溃
 			sender = (leader1 + 1) % servers
 			victim = leader1
 		}
@@ -1297,6 +1298,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		text := fmt.Sprintf("submitting %v commands to %v", nn, sender)
 		tester.AnnotateInfoInterval(start, text, text)
 
+		DPrintf("randNumLog----------------------leader:%v, crash:%v", sender, victim)
 		// let applier threads catch up with the Start()'s
 		if disconnect == false && crash == false {
 			// make sure all followers have caught up, so that
@@ -1324,6 +1326,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			ts.one(rand.Int(), servers, true)
 			leader1 = ts.checkOneLeader()
 		}
+		DPrintf("iter:%v end--------------------", i)
 	}
 }
 

@@ -2658,3 +2658,283 @@ timer.LogPhase("node:%v server:%v sync end", rf.me, server)
 
 -------------
 
+## lab3D
+
+### debug
+
+#### bug1
+
+2025/07/27 11:58:28 AE State node:2 firstLog:{3 2716215881027675491 19} lastLog:{3 7302623626107073924 27} args:&{3 1 15 3 [] 15}
+2025/07/27 11:58:28 AE Conflict:当前节点:2 当前leader:1 冲突点15 重定位点[idx:0, term:0]
+panic: runtime error: index out of range [-4]
+
+------------------------
+
+可以看见bug原因是数组越界导致的，原因就在于当时的todo确实应该做
+todo：现在应该还需要加一个agrs.prelogidx>firstlogidx的判定，或者在snapshot那一步保证这一点？
+
+------------------------
+
+### 性能优化专题
+
+#### 优化点1——replicator判定问题
+
+前面labreplicator一直在空跑，因为isLogSync判定的原因
+```Go
+func (rf *Raft) isLogSync(server int) bool {
+    // note:加锁和比较日志逻辑
+    // note:进行日志差异判定通过nextIdx而不是matchIdx，是因为【同步日志】是根据nextIdx发送的,但用matchIdx也行
+    rf.mu.RLock()
+    defer rf.mu.RUnlock()
+    return rf.state == leader && rf.nextIdx[server] == rf.getLastLog().Index+1
+}
+```
+可以看到当rf.state == follower的时候，return false，结果就是replicator一直在空跑，这是非常离谱的事情，真的是bug以一种奇怪的方式跑了起来，并且还一直都没问题
+
+#### 优化点2——ts.one加速策略
+
+这边做了一次简单的性能排查，在test中有很多ts.one这样的操作，像是lab3B的TestBackup3B中就有循环50次这样的事情。
+而ts.one这样的操作判定需要commit并且apply，主要是需要指定节点都apply，commit只需要一次广播一次就行，真正卡瓶颈的是需要第二次heartbead去进让follower进行apply这样的操作，那这种真的是得考虑是否真的需要进行优化这样的事情了
+
+#### 优化点3——ts.one在crash测试中的调整策略
+
+下面的问题是由于signal判定问题导致的
+signal以后其实不保证真的肯定被调度，有时候甚至需要signal几次，他才真的进行调度
+下面这个代码是基于sendHeartbeat中，isHeartbeat=false才signal，而不是每次都signal
+修改以后就是每次调用sendHeartbeat都会进行signal
+但是即便是每次都进行signal，也没办法保证解决这个问题
+解决方案：
+1.不再区分【心跳】和【日志同步】
+2.将cond变成channel，提高调度优先级
+
+2025/07/27 16:22:56 randNumLog----------------------leader:1, crash:2
+2025/07/27 16:22:56 OPT Start node:1 time:2025-07-27 16:22:56.331
+2025/07/27 16:22:56 OPT HeartBeat(:false) node:1 time:2025-07-27 16:22:56.331
+2025/07/27 16:22:56 OPT HeartBeat(:false) node:1 time:2025-07-27 16:22:56.331
+2025/07/27 16:22:56 OPT HeartBeat(:false) node:1 time:2025-07-27 16:22:56.331
+2025/07/27 16:22:56 OPT HeartBeat(:false) node:1 time:2025-07-27 16:22:56.331
+2025/07/27 16:22:56 OPT HeartBeat(:false) node:1 time:2025-07-27 16:22:56.331
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 6903834100013891944 29} lastLog:{2 6903834100013891944 29} args:&{2 1 29 2 [{2 1482887567833668925 30} {2 1456615768169944425 31} {2 7358993522465577435 32} {2 4661720091386824671 33} {2 3575212256208957627 34} {2 1740812145047288219 35} {2 1639258428454944504 36}] 29}
+2025/07/27 16:22:56 节点0 log rep 
+2025/07/27 16:22:56 AE Access:当前节点0 当前leader:1 提交点29 日志长度36 日志复制:[{2 1482887567833668925 30} {2 1456615768169944425 31} {2 7358993522465577435 32} {2 4661720091386824671 33} {2 3575212256208957627 34} {2 1740812145047288219 35} {2 1639258428454944504 36}]
+2025/07/27 16:22:56 follower 0 rf.nextIdx:37 rf.matchIdx:36
+2025/07/27 16:22:56 Log Commit 当前leader:1 commitIdx:36
+2025/07/27 16:22:56 OPT leaderEnd logCommit point:36
+2025/07/27 16:22:56 OPT SyncAfter node:1 server:0 time:2025-07-27 16:22:56.337
+2025/07/27 16:22:56 OPT SyncPre node:1 server:0 time:2025-07-27 16:22:56.337
+2025/07/27 16:22:56 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:56.337
+2025/07/27 16:22:56 Log Apply 当前节点:1 apply entries:[{2 1482887567833668925 30} {2 1456615768169944425 31} {2 7358993522465577435 32} {2 4661720091386824671 33} {2 3575212256208957627 34} {2 1740812145047288219 35} {2 1639258428454944504 36}]
+2025/07/27 16:22:56 OPT Apply node:1 time:2025-07-27 16:22:56.337
+2025/07/27 16:22:56 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:56.339
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 6903834100013891944 29} lastLog:{2 1639258428454944504 36} args:&{2 1 36 2 [] 36}
+2025/07/27 16:22:56 Log Apply 当前节点:0 apply entries:[{2 1482887567833668925 30} {2 1456615768169944425 31} {2 7358993522465577435 32} {2 4661720091386824671 33} {2 3575212256208957627 34} {2 1740812145047288219 35} {2 1639258428454944504 36}]
+2025/07/27 16:22:56 OPT Apply node:0 time:2025-07-27 16:22:56.346
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 6903834100013891944 29} lastLog:{2 1639258428454944504 36} args:&{2 1 36 2 [] 36}
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 6903834100013891944 29} lastLog:{2 1639258428454944504 36} args:&{2 1 36 2 [{2 1440053804877936650 37} {2 3426860175709639813 38} {2 7346619347967763615 39} {2 175355002831874779 40} {2 1718759696126299774 41} {2 3522029224986823849 42} {2 1293577359492930757 43} {2 5618287100558509813 44}] 36}
+2025/07/27 16:22:56 节点0 log rep 
+2025/07/27 16:22:56 AE Access:当前节点0 当前leader:1 提交点36 日志长度44 日志复制:[{2 1440053804877936650 37} {2 3426860175709639813 38} {2 7346619347967763615 39} {2 175355002831874779 40} {2 1718759696126299774 41} {2 3522029224986823849 42} {2 1293577359492930757 43} {2 5618287100558509813 44}]
+2025/07/27 16:22:56 follower 0 rf.nextIdx:45 rf.matchIdx:44
+2025/07/27 16:22:56 Log Commit 当前leader:1 commitIdx:44
+2025/07/27 16:22:56 OPT leaderEnd logCommit point:44
+2025/07/27 16:22:56 OPT SyncAfter node:1 server:0 time:2025-07-27 16:22:56.358
+2025/07/27 16:22:56 Replicator Signal server:0 rf.nextIdx[server]:45
+2025/07/27 16:22:56 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:56.358
+2025/07/27 16:22:56 Log Apply 当前节点:1 apply entries:[{2 1440053804877936650 37} {2 3426860175709639813 38} {2 7346619347967763615 39} {2 175355002831874779 40} {2 1718759696126299774 41} {2 3522029224986823849 42} {2 1293577359492930757 43} {2 5618287100558509813 44}]
+2025/07/27 16:22:56 OPT Apply node:1 time:2025-07-27 16:22:56.358
+2025/07/27 16:22:56 Snapshot node:1 index:39
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 6903834100013891944 29} lastLog:{2 5618287100558509813 44} args:&{2 1 44 2 [] 44}
+2025/07/27 16:22:56 Log Apply 当前节点:0 apply entries:[{2 1440053804877936650 37} {2 3426860175709639813 38} {2 7346619347967763615 39} {2 175355002831874779 40} {2 1718759696126299774 41} {2 3522029224986823849 42} {2 1293577359492930757 43} {2 5618287100558509813 44}]
+2025/07/27 16:22:56 OPT Apply node:0 time:2025-07-27 16:22:56.367
+2025/07/27 16:22:56 Snapshot node:0 index:39
+2025/07/27 16:22:56 Recovery curNode:2 rf.log[[{2 <nil> 19} {2 3847938509224032153 20} {2 7094144973859804880 21} {2 6291512537124962852 22} {2 580422634457549921 23} {2 2466564946962928995 24} {2 2227523936930136518 25} {2 8767856182634734576 26} {2 6801939505210143640 27} {2 6801939505210143640 28}]]
+2025/07/27 16:22:56 Replicator Signal server:1 rf.nextIdx[server]:0
+2025/07/27 16:22:56 OPT Start node:1 time:2025-07-27 16:22:56.373
+2025/07/27 16:22:56 Replicator Signal server:0 rf.nextIdx[server]:0
+2025/07/27 16:22:56 OPT HeartBeat(:false) node:1 time:2025-07-27 16:22:56.373
+2025/07/27 16:22:56 OPT SyncPre node:1 server:0 time:2025-07-27 16:22:56.373
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 5618287100558509813 44} args:&{2 1 44 2 [{2 8017149612375224966 45}] 44}
+2025/07/27 16:22:56 节点0 log rep 
+2025/07/27 16:22:56 AE Access:当前节点0 当前leader:1 提交点44 日志长度45 日志复制:[{2 8017149612375224966 45}]
+2025/07/27 16:22:56 OPT SyncAfter node:1 server:0 time:2025-07-27 16:22:56.394
+2025/07/27 16:22:56 OPT SyncPre node:1 server:0 time:2025-07-27 16:22:56.394
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 44 2 [{2 8017149612375224966 45}] 44}
+2025/07/27 16:22:56 节点0 log rep 
+2025/07/27 16:22:56 AE Access:当前节点0 当前leader:1 提交点44 日志长度45 日志复制:[{2 8017149612375224966 45}]
+2025/07/27 16:22:56 follower 0 rf.nextIdx:46 rf.matchIdx:45
+2025/07/27 16:22:56 Log Commit 当前leader:1 commitIdx:45
+2025/07/27 16:22:56 OPT leaderEnd logCommit point:45
+2025/07/27 16:22:56 OPT SyncAfter node:1 server:0 time:2025-07-27 16:22:56.401
+2025/07/27 16:22:56 Replicator Signal server:0 rf.nextIdx[server]:46
+2025/07/27 16:22:56 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:56.401
+2025/07/27 16:22:56 Log Apply 当前节点:1 apply entries:[{2 8017149612375224966 45}]
+2025/07/27 16:22:56 OPT Apply node:1 time:2025-07-27 16:22:56.402
+2025/07/27 16:22:56 Install Snapshot node:2 snapshotIdxAndTerm[39, 2]
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:56 Log Apply 当前节点:0 apply entries:[{2 8017149612375224966 45}]
+2025/07/27 16:22:56 OPT Apply node:0 time:2025-07-27 16:22:56.428
+2025/07/27 16:22:56 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:56.464
+2025/07/27 16:22:56 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:56 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:56.590
+2025/07/27 16:22:56 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:56 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:56.716
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:56 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:56 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:56.842
+2025/07/27 16:22:56 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:56 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:56.967
+2025/07/27 16:22:56 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:56 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:57 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:57.093
+2025/07/27 16:22:57 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:57 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:57 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:57.218
+2025/07/27 16:22:57 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:57 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:57 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:57.344
+2025/07/27 16:22:57 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:57 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:57 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:57.469
+2025/07/27 16:22:57 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:57 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:57 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:57.594
+2025/07/27 16:22:57 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:57 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:57 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:57.719
+2025/07/27 16:22:57 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:57 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:57 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:57.845
+2025/07/27 16:22:57 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:57 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:57 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:57.971
+2025/07/27 16:22:57 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:57 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:58 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:58.097
+2025/07/27 16:22:58 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:58 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:58 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:58.222
+2025/07/27 16:22:58 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:58 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:58 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:58.348
+2025/07/27 16:22:58 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [] 45}
+2025/07/27 16:22:58 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 45}
+2025/07/27 16:22:58 OPT Start node:2 time:2025-07-27 16:22:58.381
+2025/07/27 16:22:58 OPT Start node:0 time:2025-07-27 16:22:58.381
+2025/07/27 16:22:58 OPT Start node:1 time:2025-07-27 16:22:58.382
+2025/07/27 16:22:58 OPT HeartBeat(:false) node:1 time:2025-07-27 16:22:58.382
+2025/07/27 16:22:58 OPT SyncPre node:1 server:0 time:2025-07-27 16:22:58.382
+2025/07/27 16:22:58 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 45} args:&{2 1 45 2 [{2 8017149612375224966 46}] 45}
+2025/07/27 16:22:58 节点0 log rep 
+2025/07/27 16:22:58 AE Access:当前节点0 当前leader:1 提交点45 日志长度46 日志复制:[{2 8017149612375224966 46}]
+2025/07/27 16:22:58 follower 0 rf.nextIdx:47 rf.matchIdx:46
+2025/07/27 16:22:58 Log Commit 当前leader:1 commitIdx:46
+2025/07/27 16:22:58 OPT leaderEnd logCommit point:46
+2025/07/27 16:22:58 OPT SyncAfter node:1 server:0 time:2025-07-27 16:22:58.393
+2025/07/27 16:22:58 Replicator Signal server:0 rf.nextIdx[server]:47
+2025/07/27 16:22:58 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:58.393
+2025/07/27 16:22:58 Log Apply 当前节点:1 apply entries:[{2 8017149612375224966 46}]
+2025/07/27 16:22:58 OPT Apply node:1 time:2025-07-27 16:22:58.393
+2025/07/27 16:22:58 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:22:58 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:22:58 Log Apply 当前节点:0 apply entries:[{2 8017149612375224966 46}]
+2025/07/27 16:22:58 OPT Apply node:0 time:2025-07-27 16:22:58.420
+2025/07/27 16:22:58 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:58.473
+2025/07/27 16:22:58 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:22:58 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:58.599
+2025/07/27 16:22:58 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:22:58 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:22:58 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:58.725
+2025/07/27 16:22:58 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:22:58 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:58.851
+2025/07/27 16:22:58 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:22:58 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:22:58 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:58.977
+2025/07/27 16:22:58 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:22:58 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:22:59 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:59.103
+2025/07/27 16:22:59 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:22:59 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:22:59 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:59.228
+2025/07/27 16:22:59 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:22:59 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:22:59 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:59.354
+2025/07/27 16:22:59 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:22:59 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:22:59 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:59.479
+2025/07/27 16:22:59 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:22:59 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:22:59 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:59.605
+2025/07/27 16:22:59 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:22:59 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:22:59 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:59.731
+2025/07/27 16:22:59 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:22:59 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:22:59 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:59.856
+2025/07/27 16:22:59 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:22:59 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:22:59 OPT HeartBeat(:true) node:1 time:2025-07-27 16:22:59.982
+2025/07/27 16:22:59 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:23:00 OPT HeartBeat(:true) node:1 time:2025-07-27 16:23:00.107
+2025/07/27 16:23:00 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:23:00 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:23:00 OPT HeartBeat(:true) node:1 time:2025-07-27 16:23:00.233
+2025/07/27 16:23:00 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:23:00 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:23:00 OPT HeartBeat(:true) node:1 time:2025-07-27 16:23:00.359
+2025/07/27 16:23:00 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [] 46}
+2025/07/27 16:23:00 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [] 46}
+2025/07/27 16:23:00 OPT SyncAfter node:1 server:2 time:2025-07-27 16:23:00.387
+2025/07/27 16:23:00 OPT SyncPre node:1 server:2 time:2025-07-27 16:23:00.387
+2025/07/27 16:23:00 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 <nil> 39} args:&{2 1 39 2 [{2 175355002831874779 40} {2 1718759696126299774 41} {2 3522029224986823849 42} {2 1293577359492930757 43} {2 5618287100558509813 44} {2 8017149612375224966 45} {2 8017149612375224966 46}] 46}
+2025/07/27 16:23:00 节点2 log rep 
+2025/07/27 16:23:00 AE Access:当前节点2 当前leader:1 提交点46 日志长度46 日志复制:[{2 175355002831874779 40} {2 1718759696126299774 41} {2 3522029224986823849 42} {2 1293577359492930757 43} {2 5618287100558509813 44} {2 8017149612375224966 45} {2 8017149612375224966 46}]
+2025/07/27 16:23:00 follower 2 rf.nextIdx:47 rf.matchIdx:46
+2025/07/27 16:23:00 OPT SyncAfter node:1 server:2 time:2025-07-27 16:23:00.393
+2025/07/27 16:23:00 Replicator Signal server:2 rf.nextIdx[server]:47
+2025/07/27 16:23:00 Log Apply 当前节点:2 apply entries:[{2 175355002831874779 40} {2 1718759696126299774 41} {2 3522029224986823849 42} {2 1293577359492930757 43} {2 5618287100558509813 44} {2 8017149612375224966 45} {2 8017149612375224966 46}]
+2025/07/27 16:23:00 OPT Apply node:2 time:2025-07-27 16:23:00.393
+2025/07/27 16:23:00 OPT Start node:2 time:2025-07-27 16:23:00.396
+2025/07/27 16:23:00 OPT Start node:0 time:2025-07-27 16:23:00.396
+2025/07/27 16:23:00 OPT Start node:1 time:2025-07-27 16:23:00.396
+2025/07/27 16:23:00 OPT HeartBeat(:false) node:1 time:2025-07-27 16:23:00.396
+2025/07/27 16:23:00 OPT SyncPre node:1 server:2 time:2025-07-27 16:23:00.396
+2025/07/27 16:23:00 OPT SyncPre node:1 server:0 time:2025-07-27 16:23:00.396
+2025/07/27 16:23:00 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [{2 8017149612375224966 47}] 46}
+2025/07/27 16:23:00 节点2 log rep 
+2025/07/27 16:23:00 AE Access:当前节点2 当前leader:1 提交点46 日志长度47 日志复制:[{2 8017149612375224966 47}]
+2025/07/27 16:23:00 follower 2 rf.nextIdx:48 rf.matchIdx:47
+2025/07/27 16:23:00 Log Commit 当前leader:1 commitIdx:47
+2025/07/27 16:23:00 OPT leaderEnd logCommit point:47
+2025/07/27 16:23:00 OPT SyncAfter node:1 server:2 time:2025-07-27 16:23:00.413
+2025/07/27 16:23:00 Replicator Signal server:2 rf.nextIdx[server]:48
+2025/07/27 16:23:00 OPT HeartBeat(:true) node:1 time:2025-07-27 16:23:00.413
+2025/07/27 16:23:00 Log Apply 当前节点:1 apply entries:[{2 8017149612375224966 47}]
+2025/07/27 16:23:00 OPT Apply node:1 time:2025-07-27 16:23:00.413
+2025/07/27 16:23:00 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 46} args:&{2 1 46 2 [{2 8017149612375224966 47}] 46}
+2025/07/27 16:23:00 节点0 log rep 
+2025/07/27 16:23:00 AE Access:当前节点0 当前leader:1 提交点46 日志长度47 日志复制:[{2 8017149612375224966 47}]
+2025/07/27 16:23:00 follower 0 rf.nextIdx:48 rf.matchIdx:47
+2025/07/27 16:23:00 OPT SyncAfter node:1 server:0 time:2025-07-27 16:23:00.421
+2025/07/27 16:23:00 Replicator Signal server:0 rf.nextIdx[server]:48
+2025/07/27 16:23:00 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 47} args:&{2 1 46 2 [] 47}
+2025/07/27 16:23:00 OPT HeartBeat(:true) node:1 time:2025-07-27 16:23:00.484
+2025/07/27 16:23:00 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 8017149612375224966 47} args:&{2 1 47 2 [] 47}
+2025/07/27 16:23:00 Log Apply 当前节点:2 apply entries:[{2 8017149612375224966 47}]
+2025/07/27 16:23:00 OPT Apply node:2 time:2025-07-27 16:23:00.511
+2025/07/27 16:23:00 OPT HeartBeat(:true) node:1 time:2025-07-27 16:23:00.610
+2025/07/27 16:23:00 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 47} args:&{2 1 47 2 [] 47}
+2025/07/27 16:23:00 Log Apply 当前节点:0 apply entries:[{2 8017149612375224966 47}]
+2025/07/27 16:23:00 OPT Apply node:0 time:2025-07-27 16:23:00.619
+2025/07/27 16:23:00 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 8017149612375224966 47} args:&{2 1 47 2 [] 47}
+2025/07/27 16:23:01 OPT HeartBeat(:true) node:1 time:2025-07-27 16:23:01.261
+2025/07/27 16:23:01 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 47} args:&{2 1 47 2 [] 47}
+2025/07/27 16:23:01 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 8017149612375224966 47} args:&{2 1 47 2 [] 47}
+2025/07/27 16:23:01 OPT HeartBeat(:true) node:1 time:2025-07-27 16:23:01.387
+2025/07/27 16:23:01 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 47} args:&{2 1 47 2 [] 47}
+2025/07/27 16:23:01 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 8017149612375224966 47} args:&{2 1 47 2 [] 47}
+2025/07/27 16:23:01 OPT HeartBeat(:true) node:1 time:2025-07-27 16:23:01.513
+2025/07/27 16:23:01 AE State node:0 firstLog:{2 7346619347967763615 39} lastLog:{2 8017149612375224966 47} args:&{2 1 47 2 [] 47}
+2025/07/27 16:23:01 AE State node:2 firstLog:{2 <nil> 39} lastLog:{2 8017149612375224966 47} args:&{2 1 47 2 [] 47}
+2025/07/27 16:23:01 iter:3 end--------------------
