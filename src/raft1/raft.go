@@ -591,13 +591,12 @@ func (rf *Raft) sendHeartBeat(isHeartBeat bool) {
 		}
 
 		if !isHeartBeat {
-			// rf.replicatorCond[server].Signal()
+			rf.replicatorCond[server].Signal()
 		} else {
 			// DPrintf("leader开始发送心跳")
-			go rf.syncLogOnce(server, true)
+			go rf.syncLogOnce(server)
 		}
 		// DPrintf("heart signal 唤醒%v ",server)
-		rf.replicatorCond[server].Signal()
 	}
 
 }
@@ -615,17 +614,14 @@ func (rf *Raft) generateInstallSnapshotArgs(server int) *InstallSnapshotArgs {
 }
 
 // 生成AE，加锁的事情自己外面保证
-func (rf *Raft) generateAppendEntriesArgs(server int, isHeartBeat bool) *AppendEntriesArgs {
+func (rf *Raft) generateAppendEntriesArgs(server int) *AppendEntriesArgs {
 	// todo: 再看看怎么修改合适
 	// preLogIdx是不考虑截断的idx, preLogActualIdx是给log索引用的
 	preLogIdx := rf.nextIdx[server] - 1
 	preLogIdxForLog := preLogIdx - rf.getFirstLog().Index
 	// 执行深拷贝，是为了防止log发生扩容而产生的线程安全问题
-	entries := []LogEntry{}
-	if !isHeartBeat {
-		entries = make([]LogEntry, len(rf.log[preLogIdxForLog+1:]))
-		copy(entries, rf.log[preLogIdxForLog+1:])
-	}
+	entries := make([]LogEntry, len(rf.log[preLogIdxForLog+1:]))
+	copy(entries, rf.log[preLogIdxForLog+1:])
 
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -639,7 +635,7 @@ func (rf *Raft) generateAppendEntriesArgs(server int, isHeartBeat bool) *AppendE
 }
 
 // 发送和处理AE的逻辑，同步follower和leader之间的日志逻辑
-func (rf *Raft) syncLogOnce(server int, isHeartBeat bool) {
+func (rf *Raft) syncLogOnce(server int) {
 	rf.mu.RLock()
 
 	if rf.state != leader {
@@ -674,7 +670,7 @@ func (rf *Raft) syncLogOnce(server int, isHeartBeat bool) {
 		return
 	}
 
-	args := rf.generateAppendEntriesArgs(server, isHeartBeat)
+	args := rf.generateAppendEntriesArgs(server)
 	rf.mu.RUnlock()
 
 	reply := &AppendEntriesReply{}
@@ -772,7 +768,7 @@ func (rf *Raft) replicator(server int) {
 		// note：判断和发送不是原子的，所以可能会出现一定的线程安全问题
 
 		DPrintf("OPT SyncPre node:%v server:%v time:%v", rf.me, server, time.Now().Format("2006-01-02 15:04:05.000"))
-		rf.syncLogOnce(server, false)
+		rf.syncLogOnce(server)
 		DPrintf("OPT SyncAfter node:%v server:%v time:%v", rf.me, server, time.Now().Format("2006-01-02 15:04:05.000"))
 	}
 }
