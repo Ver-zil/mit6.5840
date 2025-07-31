@@ -600,7 +600,9 @@ func (rf *Raft) sendHeartBeat(isHeartBeat bool) {
 		// 用chan替换cond，非阻塞式发送
 		select {
 		case rf.replicatorChan[server] <- struct{}{}:
+			DPrintf("Signal for server:%v", server)
 		default:
+			DPrintf("heart for server:%v", server)
 		}
 	}
 
@@ -775,9 +777,11 @@ func (rf *Raft) replicator(server int) {
 		// 同样也需要保证在这个过程中state=leader，需要保证旧leader能正常变成follower
 		// note：判断和发送不是原子的，所以可能会出现一定的线程安全问题
 
+		start := time.Now()
 		DPrintf("OPT SyncPre node:%v server:%v time:%v", rf.me, server, time.Now().Format("2006-01-02 15:04:05.000"))
 		rf.syncLogOnce(server, false)
 		DPrintf("OPT SyncAfter node:%v server:%v time:%v", rf.me, server, time.Now().Format("2006-01-02 15:04:05.000"))
+		DPrintf("OPT one round node:%v server:%v time:%v", rf.me, server, time.Since(start).Milliseconds())
 	}
 }
 
@@ -842,7 +846,10 @@ func (rf *Raft) applyMsgFilter() {
 
 			rf.applyChan <- msg
 		} else if msg.CommandValid {
-			// msg直接进行提交即可
+			// note: msg不能直接进行提交，需要过滤旧的日志提交，详情见log-lab3D-bug2
+			if msg.CommandIndex <= rf.getFirstLog().Index {
+				continue
+			}
 			rf.applyChan <- msg
 		} else if rf.killed() {
 			return
