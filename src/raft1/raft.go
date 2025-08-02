@@ -112,7 +112,6 @@ type Raft struct {
 	heartBeatTimer  *time.Timer           // leader定时给其他节点发送心跳用的
 	applyChan       chan raftapi.ApplyMsg // 给外部将已commit日志进行apply的
 	applyChanFilter chan raftapi.ApplyMsg // 所有的applyMsg先走这个channel进行一次过滤
-	replicatorChan  []chan interface{}    // 用来唤醒同步日志的底层机制
 	applyChanCond   *sync.Cond            // 用于进行commit和apply的逻辑
 }
 
@@ -595,16 +594,11 @@ func (rf *Raft) sendHeartBeat(isHeartBeat bool) {
 			// rf.replicatorCond[server].Signal()
 		} else {
 			// DPrintf("leader开始发送心跳")
-			go rf.syncLogOnce(server, true)
+			// go rf.syncLogOnce(server, true)
 		}
 		// DPrintf("heart signal 唤醒%v ",server)
 		// 用chan替换cond，非阻塞式发送
-		select {
-		case rf.replicatorChan[server] <- struct{}{}:
-			DPrintf("Signal for server:%v", server)
-		default:
-			DPrintf("heart for server:%v", server)
-		}
+		go rf.replicator(server)
 	}
 
 }
@@ -766,24 +760,19 @@ func (rf *Raft) syncLogOrNot(server int) bool {
 // 心跳和日志复制的底层机制
 func (rf *Raft) replicator(server int) {
 
-	for rf.killed() == false {
-		// 被kill以后状态会变，不会发送，就算有意外情况也最多发一次
-		for !rf.syncLogOrNot(server) {
-			DPrintf("Replicator Signal server:%v rf.nextIdx[server]:%v", server, rf.nextIdx[server])
-			select {
-			case <-rf.replicatorChan[server]:
-			}
-		}
-		// 进行同步检测，如果leader和follower之间日志不同步则通过for完成同步过程
-		// 同样也需要保证在这个过程中state=leader，需要保证旧leader能正常变成follower
-		// note：判断和发送不是原子的，所以可能会出现一定的线程安全问题
+	rf.syncLogOnce(server, true)
+	// 进行同步检测，如果leader和follower之间日志不同步则通过for完成同步过程
+	// 同样也需要保证在这个过程中state=leader，需要保证旧leader能正常变成follower
+	// note：判断和发送不是原子的，所以可能会出现一定的线程安全问题
 
+	for rf.syncLogOrNot(server) {
 		start := time.Now()
 		DPrintf("OPT SyncPre node:%v server:%v time:%v", rf.me, server, time.Now().Format("2006-01-02 15:04:05.000"))
 		rf.syncLogOnce(server, false)
 		DPrintf("OPT SyncAfter node:%v server:%v time:%v", rf.me, server, time.Now().Format("2006-01-02 15:04:05.000"))
 		DPrintf("OPT one round node:%v server:%v time:%v", rf.me, server, time.Since(start).Milliseconds())
 	}
+
 }
 
 // 当有日志被提交的时候，应该将其应用到rf.applyChan
@@ -1045,7 +1034,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		heartBeatTimer:  time.NewTimer(GetStableHeartBeatTimeout()),
 		applyChan:       applyCh,
 		applyChanFilter: make(chan raftapi.ApplyMsg, 100),
-		replicatorChan:  make([]chan interface{}, len(peers)),
 		applyChanCond:   sync.NewCond(&sync.Mutex{}),
 	}
 
@@ -1054,13 +1042,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	for server := range rf.peers {
-		if server != rf.me {
-			rf.replicatorChan[server] = make(chan interface{})
-			go rf.replicator(server)
-		}
-
-	}
 	rf.applyChanCond = sync.NewCond(&rf.mu)
 	// start ticker goroutine to start elections
 	go rf.ticker()
