@@ -835,8 +835,12 @@ func (rf *Raft) applyMsgFilter() {
 			rf.applyChan <- msg
 		} else if msg.CommandValid {
 			// msg直接进行提交即可
+			if msg.CommandIndex <= rf.getFirstLog().Index {
+				continue
+			}
 			rf.applyChan <- msg
 		} else if rf.killed() {
+			// note: 这个方式比直接关闭chan要安全
 			return
 		}
 	}
