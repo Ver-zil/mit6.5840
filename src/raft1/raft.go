@@ -232,9 +232,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	}
 
 	// todo: go里切片底层数据不变，如果想把之前的数据进行回收应该直接进行copy
+	DPrintf("Snapshot node:%v index:%v log:%v", rf.me, index, rf.log)
 	rf.log = rf.log[index-curFirstLogIdx:]
 	rf.persister.Save(rf.getRaftStateBytes(), snapshot)
-	DPrintf("Snapshot node:%v index:%v", rf.me, index)
 }
 
 type InstallSnapshotArgs struct {
@@ -486,10 +486,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 【日志同步】负责复制日志，心跳负责提交日志
 	// todo: args.prelogidx比0号日志更小的情况是否需要考虑
 	if len(args.Entries) > 0 {
-		rf.log = append(rf.log[0:args.PrevLogIdx-curFirstLog.Index+1], args.Entries...)
-		// todo:这里其实也可以加入日志提交逻辑，不是非得让heartbeat进行提交
+		// note: 这个写法麻烦, 但是可以避免包乱序导致的奇怪问题
+		for idx, entry := range args.Entries {
+			if entryIdx := entry.Index; entryIdx-curFirstLog.Index >= len(rf.log) || entry.Term != rf.log[entryIdx-curFirstLog.Index].Term {
+				rf.log = append(rf.log[:entryIdx-curFirstLog.Index], args.Entries[idx:]...)
+				break
+			}
+		}
+		// rf.log = append(rf.log[0:args.PrevLogIdx-curFirstLog.Index+1], args.Entries...) // 这个没办法解决网络延迟包乱序问题
 		rf.persist()
-		DPrintf("节点%v log rep ", rf.me)
+		DPrintf("节点%v log rep log:%v", rf.me, rf.log)
 	}
 	// else if len(args.Entries) == 0 && min(args.LeaderCommit, args.PrevLogIdx) > rf.commitIdx {
 	// 	rf.commitIdx = min(args.LeaderCommit, args.PrevLogIdx)
@@ -822,7 +828,7 @@ func (rf *Raft) applyMsgFilter() {
 			newLog := make([]LogEntry, 1)
 			newLog[0].Index, newLog[0].Term = msg.SnapshotIndex, msg.SnapshotTerm
 			if rf.getLastLog().Index > msg.SnapshotIndex {
-				newLog = append(newLog, rf.log[msg.CommandIndex+1:]...)
+				newLog = append(newLog, rf.log[msg.SnapshotIndex-rf.getFirstLog().Index+1:]...)
 			}
 
 			rf.log = newLog
