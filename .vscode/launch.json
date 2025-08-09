@@ -25,6 +25,8 @@
             // "cwd": "${workspaceFolder}/src/main" // 设置工作目录到程序入口
         },
         {
+            // vscode里debug lab1，得先运行下面这个
+            // go build -buildmode=plugin -gcflags="all=-N -l" ../mrapps/wc.go
             "name": "mr sequential",
             "type": "go",
             "request": "launch",
@@ -37,6 +39,16 @@
                 // "GO111MODULE": "off" // 禁用 Go Modules（若项目未使用）
             },
             // "cwd": "${workspaceFolder}/src/main" // 设置工作目录到程序入口
+        },
+        {
+            "name": "peformance_test",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/raft1/performance_test.py",
+            "args": [
+                "-d",
+            ], // 运行时参数
+            "console": "integratedTerminal"
         }
     ]
 }

@@ -3,6 +3,7 @@ package raft
 import (
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	tester "6.5840/tester1"
@@ -11,8 +12,10 @@ import (
 // Debugging
 const Debug = false
 
+var EnvDebug = os.Getenv("DEBUG") != ""
+
 func DPrintf(format string, a ...interface{}) {
-	if Debug {
+	if Debug || EnvDebug {
 		log.Printf(format, a...)
 	}
 }
