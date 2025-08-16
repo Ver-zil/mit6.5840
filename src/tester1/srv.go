@@ -16,6 +16,7 @@ type Server struct {
 	clntEnds []*labrpc.ClientEnd
 }
 
+// 创建server，针对当前group其他所有的server建立一个自己的clientEnd进行专门的通讯
 func makeServer(net *labrpc.Network, gid Tgid, nsrv int) *Server {
 	srv := &Server{net: net}
 	srv.endNames = make([]string, nsrv)

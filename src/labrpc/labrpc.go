@@ -80,6 +80,7 @@ type replyMsg struct {
 	reply []byte
 }
 
+// server注册后给外面开放调用server服务的接口
 type ClientEnd struct {
 	endname interface{}   // this end-point's name
 	ch      chan reqMsg   // copy of Network.endCh
@@ -161,6 +162,7 @@ func MakeNetwork() *Network {
 		for {
 			select {
 			case xreq := <-rn.endCh:
+				// 统计流量，再处理msg
 				atomic.AddInt32(&rn.count, 1)
 				atomic.AddInt64(&rn.bytes, int64(len(xreq.args)))
 				go rn.processReq(xreq)
@@ -177,6 +179,7 @@ func (rn *Network) Cleanup() {
 	close(rn.done)
 }
 
+// set
 func (rn *Network) Reliable(yes bool) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -191,6 +194,7 @@ func (rn *Network) IsReliable() bool {
 	return rn.reliable
 }
 
+// set
 func (rn *Network) LongReordering(yes bool) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -198,6 +202,7 @@ func (rn *Network) LongReordering(yes bool) {
 	rn.longReordering = yes
 }
 
+// set
 func (rn *Network) LongDelays(yes bool) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -212,6 +217,7 @@ func (rn *Network) IsLongDelays() bool {
 	return rn.longDelays
 }
 
+// 读取endname所有的info(enabled, servername, server, reliable, longreordering)
 func (rn *Network) readEndnameInfo(endname interface{}) (enabled bool,
 	servername interface{}, server *Server, reliable bool, longreordering bool,
 ) {
@@ -228,6 +234,7 @@ func (rn *Network) readEndnameInfo(endname interface{}) (enabled bool,
 	return
 }
 
+// servername对应的位置替换成了别的server也是dead
 func (rn *Network) isServerDead(endname interface{}, servername interface{}, server *Server) bool {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -238,16 +245,19 @@ func (rn *Network) isServerDead(endname interface{}, servername interface{}, ser
 	return false
 }
 
+// rpc net实际处理msg的地方
 func (rn *Network) processReq(req reqMsg) {
 	enabled, servername, server, reliable, longreordering := rn.readEndnameInfo(req.endname)
 
 	if enabled && servername != nil && server != nil {
+		// unreliable网络模拟短延迟
 		if reliable == false {
 			// short delay
 			ms := (rand.Int() % SHORTDELAY)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
 
+		// unreliable网络模拟随机丢包问题(10%)
 		if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the request, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
@@ -258,6 +268,7 @@ func (rn *Network) processReq(req reqMsg) {
 		// in a separate thread so that we can periodically check
 		// if the server has been killed and the RPC should get a
 		// failure reply.
+		// ???
 		ech := make(chan replyMsg)
 		go func() {
 			r := server.dispatch(req)
@@ -318,6 +329,8 @@ func (rn *Network) processReq(req reqMsg) {
 		if rn.IsLongDelays() {
 			// let Raft tests check that leader doesn't send
 			// RPCs synchronously.
+			// note: leader不能采用单replicator去同步日志的核心原因
+			// note: 因为模拟的延迟时间太长了，所以很容易网络恢复后，replicator还在等的问题
 			ms = (rand.Int() % LONGDELAY)
 		} else {
 			// many kv tests require the client to try each
@@ -333,6 +346,8 @@ func (rn *Network) processReq(req reqMsg) {
 
 // create a client end-point.
 // start the thread that listens and delivers.
+//
+// 将client注册到net里
 func (rn *Network) MakeEnd(endname interface{}) *ClientEnd {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -380,6 +395,8 @@ func (rn *Network) DeleteServer(servername interface{}) {
 
 // connect a ClientEnd to a server.
 // a ClientEnd can only be connected once in its lifetime.
+//
+// 将server和client通过name建立联系(only once)
 func (rn *Network) Connect(endname interface{}, servername interface{}) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -435,6 +452,7 @@ func (rs *Server) AddService(svc *Service) {
 	rs.services[svc.name] = svc
 }
 
+// rpc调用方法端
 func (rs *Server) dispatch(req reqMsg) replyMsg {
 	rs.mu.Lock()
 
@@ -479,8 +497,11 @@ type Service struct {
 
 func MakeService(rcvr interface{}) *Service {
 	svc := &Service{}
+	// 获取所有rvcr的类型信息(name, kind, numberMethod, method)
 	svc.typ = reflect.TypeOf(rcvr)
+	// 获取值（拷贝）
 	svc.rcvr = reflect.ValueOf(rcvr)
+	// Indirect可以返回指针指向的值(非指针直接返回值)，这种使用法比svc.typ.name()更健壮
 	svc.name = reflect.Indirect(svc.rcvr).Type().Name()
 	svc.methods = map[string]reflect.Method{}
 
@@ -492,6 +513,8 @@ func MakeService(rcvr interface{}) *Service {
 		//fmt.Printf("%v pp %v ni %v 1k %v 2k %v no %v\n",
 		//	mname, method.PkgPath, mtype.NumIn(), mtype.In(1).Kind(), mtype.In(2).Kind(), mtype.NumOut())
 
+		// note: 反射方法出来的的第一个参数是rf(self)
+		// note: 大小写/参数数量=3/第三个参(reply)数=ptr/无出参
 		if method.PkgPath != "" || // capitalized?
 			mtype.NumIn() != 3 ||
 			//mtype.In(1).Kind() != reflect.Ptr ||
@@ -508,6 +531,7 @@ func MakeService(rcvr interface{}) *Service {
 	return svc
 }
 
+// rpc调用方法实际处理
 func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 	if method, ok := svc.methods[methname]; ok {
 		// prepare space into which to read the argument.

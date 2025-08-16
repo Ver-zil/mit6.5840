@@ -48,6 +48,7 @@ func (ts *Test) cleanup() {
 	ts.CheckTimeout()
 }
 
+// 返回raft server和raft
 func (ts *Test) mksrv(ends []*labrpc.ClientEnd, grp tester.Tgid, srv int, persister *tester.Persister) []tester.IService {
 	s := newRfsrv(ts, srv, ends, persister, ts.snapshot)
 	ts.mu.Lock()

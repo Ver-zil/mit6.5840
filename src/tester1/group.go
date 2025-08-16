@@ -37,6 +37,7 @@ func newGroups(net *labrpc.Network) *Groups {
 	return &Groups{net: net, grps: make(map[Tgid]*ServerGrp)}
 }
 
+// group的内置方法，在gorup中gid的位置创建nsrv个server集群
 func (gs *Groups) MakeGroup(gid Tgid, nsrv int, mks FstartServer) {
 	gs.mu.Lock()
 	defer gs.mu.Unlock()
@@ -67,6 +68,7 @@ func (gs *Groups) cleanup() {
 	}
 }
 
+// 一个group的server集群
 type ServerGrp struct {
 	net         *labrpc.Network
 	srvs        []*Server
@@ -77,6 +79,7 @@ type ServerGrp struct {
 	mu          sync.Mutex
 }
 
+// 创建server群，并且在net中注册好server需要和其他server沟通的client
 func makeSrvGrp(net *labrpc.Network, gid Tgid, n int, mks FstartServer) *ServerGrp {
 	sg := &ServerGrp{
 		net:       net,
@@ -232,10 +235,16 @@ func (sg *ServerGrp) SnapshotSize() int {
 }
 
 // If restart servers, first call shutdownserver
+//
+// 重新造一个新的server，将原来的persistent深拷贝一个新的。
+// 并且将当前server的服务注册到net中
 func (sg *ServerGrp) StartServer(i int) {
+	// todo 这里是否需要上锁?
 	srv := sg.srvs[i].startServer(sg.gid)
 	sg.srvs[i] = srv
 
+	// note: 将labrpc中的server和srv的server关联的地方
+	// note: 将srv的svcs合并到labrpc中一个的server中，并且注册到net中
 	srv.svcs = sg.mks(srv.clntEnds, sg.gid, i, srv.saved)
 	labsrv := labrpc.MakeServer()
 	for _, svc := range srv.svcs {

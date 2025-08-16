@@ -87,6 +87,7 @@ func (cfg *Config) Cleanup() {
 	cfg.CheckTimeout()
 }
 
+// make gid群组的server集群并启动
 func (cfg *Config) MakeGroupStart(gid Tgid, nsrv int, mks FstartServer) {
 	cfg.MakeGroup(gid, nsrv, mks)
 	cfg.Group(gid).StartServers()
