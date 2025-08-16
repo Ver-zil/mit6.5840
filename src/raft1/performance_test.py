@@ -200,12 +200,7 @@ def get_official_test(tests: List[str], official_tests: List[str]) -> List[str]:
     
     for test in official_tests:
         for pattern in tests:
-            regex = (
-                f"^Test.*{pattern}$" 
-                if re.match(r"^\d+[A-Z]$", pattern) 
-                else f"^{pattern}$"
-            )
-            if re.search(regex, test) and test not in matched:
+            if re.search(fr"{pattern}", test) and test not in matched:
                 matched.add(test)
                 result.append(test)
                 break  # 匹配到一个模式即可
@@ -226,7 +221,7 @@ def run_tests(
     loop: bool             = typer.Option(False,  '--loop',            '-l',    help='Run continuously'),
     growth: int            = typer.Option(10,     '--growth',          '-g',    help='Growth ratio of iterations when using --loop'),
     timing: bool           = typer.Option(False,  '--timing',          '-t',    help='Report timing, only works on macOS'),
-    debug: bool            = typer.Option(False,  '--debug',           '-d',    help='Enable debug mode(need to add env var in util.go)'),
+    debug: bool            = typer.Option(True,   '--debug',           '-d',    help='Disable debug mode(need to add env var in util.go)'),
     match: bool            = typer.Option(True,   '--match',           '-m',    help='Disable auto match'),
     # raft: bool             = typer.Option(False,  '--raft',            '-f',    help='test all raft tests separately'),
     # fmt: on
@@ -319,7 +314,6 @@ def run_tests(
                         # 根据结果重新刷新进度条颜色
                         if rc != 0:
                             print(f"Failed test {test} - {dest}")
-                            results["Sum"]['failed'].add(1)
                             results[test]['failed'].add(1)
                             task_progress.update(tasks[test], description=f"[red]{test}[/red]", failed=results[test]['failed'].n)
                         else:
