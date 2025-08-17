@@ -32,7 +32,7 @@ type rsmSrv struct {
 	me      int
 	rsm     *RSM
 	mu      sync.Mutex
-	counter int
+	counter int // doOP inc的次数
 }
 
 func makeRsmSrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.Persister, snapshot bool) *rsmSrv {
@@ -51,6 +51,7 @@ func makeRsmSrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.P
 	return s
 }
 
+// 只接收Inc和Null类型，会返回对应的Rep
 func (rs *rsmSrv) DoOp(req any) any {
 	//log.Printf("%d: DoOp: %T(%v)", rs.me, req, req)
 	switch req.(type) {
@@ -68,6 +69,7 @@ func (rs *rsmSrv) DoOp(req any) any {
 	return nil
 }
 
+// srv的snapshot其实只是把counter给记录了
 func (rs *rsmSrv) Snapshot() []byte {
 	//log.Printf("%d: snapshot", rs.me)
 	w := new(bytes.Buffer)
@@ -85,6 +87,7 @@ func (rs *rsmSrv) Restore(data []byte) {
 	//log.Printf("%d: restore %d", rs.me, rs.counter)
 }
 
+// kill的时候，只把自己和rsm的连接断了，但是没有把rsm和srv的连接断了
 func (rs *rsmSrv) Kill() {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()

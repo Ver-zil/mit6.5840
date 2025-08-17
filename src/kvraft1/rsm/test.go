@@ -47,12 +47,14 @@ func (ts *Test) cleanup() {
 	ts.CheckTimeout()
 }
 
+// 返回的service只有raft，好像最后只kill raft
 func (ts *Test) mksrv(ends []*labrpc.ClientEnd, grp tester.Tgid, srv int, persister *tester.Persister) []tester.IService {
 	s := makeRsmSrv(ts, srv, ends, persister, false)
 	ts.srvs[srv] = s
 	return []tester.IService{s.rsm.Raft()}
 }
 
+// 判断s是否在数组p里
 func inPartition(s int, p []int) bool {
 	if p == nil {
 		return true
@@ -65,6 +67,9 @@ func inPartition(s int, p []int) bool {
 	return false
 }
 
+// 限定范围在p这个群里，10s内通过调用rsm.submit让raft复制req的日志
+// 所有在群的server都会调用
+// 返回rpc.OK就return rep，否则nil
 func (ts *Test) onePartition(p []int, req any) any {
 	// try all the servers, maybe one is the leader but give up after NSEC
 	t0 := time.Now()
@@ -94,6 +99,7 @@ func (ts *Test) onePartition(p []int, req any) any {
 	return nil
 }
 
+// 最后返回的rep得是IncRep类型的
 func (ts *Test) oneInc() *IncRep {
 	rep := ts.onePartition(nil, Inc{})
 	if rep == nil {
@@ -102,6 +108,7 @@ func (ts *Test) oneInc() *IncRep {
 	return rep.(*IncRep)
 }
 
+// 功能和Inc类似
 func (ts *Test) oneNull() *NullRep {
 	rep := ts.onePartition(nil, Null{})
 	if rep == nil {
@@ -110,6 +117,7 @@ func (ts *Test) oneNull() *NullRep {
 	return rep.(*NullRep)
 }
 
+// 30轮内需要有nsrv个server count=v
 func (ts *Test) checkCounter(v int, nsrv int) {
 	to := 10 * time.Millisecond
 	n := 0
@@ -130,6 +138,7 @@ func (ts *Test) checkCounter(v int, nsrv int) {
 	ts.Fatalf(err)
 }
 
+// 检测有多少个server doOp的次数=v
 func (ts *Test) countValue(v int) int {
 	i := 0
 	for _, s := range ts.srvs {
@@ -153,6 +162,7 @@ func (ts *Test) connect(i int) {
 	ts.g.ConnectOne(i)
 }
 
+// 获取cfg的第gid群的leader
 func Leader(cfg *tester.Config, gid tester.Tgid) (bool, int) {
 	for i, ss := range cfg.Group(gid).Services() {
 		for _, s := range ss {
