@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 
 	"6.5840/labgob"
 	"6.5840/labrpc"
@@ -30,6 +31,9 @@ type rfsrv struct {
 	mu   sync.Mutex
 	raft raftapi.Raft
 	logs map[int]any // copy of each server's committed entries
+
+	dead      int32
+	applyChan chan raftapi.ApplyMsg
 }
 
 func newRfsrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.Persister, snapshot bool) *rfsrv {
@@ -59,7 +63,9 @@ func newRfsrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.Per
 	} else {
 		go s.applier(applyCh)
 	}
-	
+
+	// 增加同步机制，等applier进入僵尸状态再退出kill
+	s.applyChan = applyCh
 	DPrintf("Debug new server:%v is created", s.me)
 	return s
 }
@@ -77,7 +83,15 @@ func (rs *rfsrv) Kill() {
 		rs.persister.Save(raftlog, snapshot)
 	}
 
+	// 阻塞式等待applier收到msg，并进入僵尸状态
+	atomic.StoreInt32(&rs.dead, 1)
+	rs.applyChan <- raftapi.ApplyMsg{}
 	DPrintf("Debug old server:%v is killed", rs.me)
+}
+
+func (rs *rfsrv) killed() bool {
+	z := atomic.LoadInt32(&rs.dead)
+	return z == 1
 }
 
 func (rs *rfsrv) GetState() (int, bool) {
@@ -103,6 +117,11 @@ func (rs *rfsrv) Logs(i int) (any, bool) {
 // contents
 func (rs *rfsrv) applier(applyCh chan raftapi.ApplyMsg) {
 	for m := range applyCh {
+		// 进入僵尸状态
+		if rs.killed() {
+			continue
+		}
+
 		if m.CommandValid == false {
 			// ignore other types of ApplyMsg
 		} else {
@@ -129,6 +148,10 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 	}
 
 	for m := range applyCh {
+		// 进入僵尸状态
+		if rs.killed() {
+			continue
+		}
 		err_msg := ""
 		if m.SnapshotValid {
 			err_msg = rs.ingestSnap(m.Snapshot, m.SnapshotIndex)
