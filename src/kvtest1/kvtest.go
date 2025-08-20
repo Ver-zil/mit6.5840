@@ -123,6 +123,7 @@ type ClntRes struct {
 	Nmaybe int
 }
 
+// 通过get操作检查一下默认key的put操作是否存在并发问题，通过get得到的ver0和nok,nmaybe进行比较
 func (ts *Test) CheckPutConcurrent(ck IKVClerk, key string, rs []ClntRes, res *ClntRes, reliable bool) {
 	e := EntryV{}
 	ver0 := ts.GetJson(ck, key, -1, &e)
@@ -131,15 +132,19 @@ func (ts *Test) CheckPutConcurrent(ck IKVClerk, key string, rs []ClntRes, res *C
 		res.Nmaybe += r.Nmaybe
 	}
 	if reliable {
+		// 网络环境稳定的情况下，要保证读取key的版本正好等于其成功次数
 		if ver0 != rpc.Tversion(res.Nok) {
 			ts.Fatalf("Reliable: Wrong number of puts: server %d clnts %v", ver0, res)
 		}
 	} else if ver0 > rpc.Tversion(res.Nok+res.Nmaybe) {
+		// 网络非稳定情况得保证读取到的版本号<=其可能成功的次数
 		ts.Fatalf("Unreliable: Wrong number of puts: server %d clnts %v", ver0, res)
 	}
 }
 
 // a client runs the function f and then signals it is done
+//
+// 一次性用途，将me，临时创建的clerk，done传到fn(自定义运作方式)进去，将clerk结果封装到发送到ca
 func (ts *Test) runClient(me int, ca chan ClntRes, done chan struct{}, mkc IClerkMaker, fn Fclnt) {
 	ck := mkc.MakeClerk()
 	v := fn(me, ck, done)
@@ -150,6 +155,8 @@ func (ts *Test) runClient(me int, ca chan ClntRes, done chan struct{}, mkc ICler
 type Fclnt func(int, IKVClerk, chan struct{}) ClntRes
 
 // spawn ncli clients
+//
+// 创造nclnt个client去跑fn，t秒过后终止，最终将结果汇总到数组中
 func (ts *Test) SpawnClientsAndWait(nclnt int, t time.Duration, fn Fclnt) []ClntRes {
 	ca := make([]chan ClntRes, nclnt)
 	done := make(chan struct{})
@@ -180,6 +187,7 @@ func (ts *Test) GetJson(ck IKVClerk, key string, me int, v any) rpc.Tversion {
 	}
 }
 
+// 将v进行json序列化
 func (ts *Test) PutJson(ck IKVClerk, key string, v any, ver rpc.Tversion, me int) rpc.Err {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -205,15 +213,20 @@ type EntryV struct {
 
 // Keep trying until we get one put succeeds while other clients
 // tryint to put to the same key
+//
+// 在ok或者errMaybe之前会重复调用
 func (ts *Test) OnePut(me int, ck IKVClerk, key string, ver rpc.Tversion) (rpc.Tversion, bool) {
 	for true {
 		err := ts.PutJson(ck, key, EntryV{me, ver}, ver, me)
+		// client一些无关err不允许返回
 		if !(err == rpc.OK || err == rpc.ErrVersion || err == rpc.ErrMaybe) {
 			ts.Fatalf("Wrong error %v", err)
 		}
 		e := EntryV{}
 		ver0 := ts.GetJson(ck, key, me, &e)
+		// 如果put成功了，那get
 		if err == rpc.OK && ver0 == ver+1 { // my put?
+			// 这个判断看起来好像有点问题哦，应该是or而不是and
 			if e.Id != me && e.V != ver {
 				ts.Fatalf("Wrong value %v", e)
 			}
@@ -256,6 +269,8 @@ func (ts *Test) Partitioner(gid tester.Tgid, ch chan bool) {
 }
 
 // One of perhaps many clients doing OnePut's until done signal.
+//
+// 一个client在有done信号之前，就一直进行put操作，是否随机取决于配置
 func (ts *Test) OneClientPut(cli int, ck IKVClerk, ka []string, done chan struct{}) ClntRes {
 	res := ClntRes{}
 	verm := make(map[string]rpc.Tversion)
@@ -283,6 +298,7 @@ func (ts *Test) OneClientPut(cli int, ck IKVClerk, ka []string, done chan struct
 	return res
 }
 
+// 产生n个key -> ["k1", "k2"..., "kn"]
 func MakeKeys(n int) []string {
 	keys := make([]string, n)
 	for i := 0; i < n; i++ {

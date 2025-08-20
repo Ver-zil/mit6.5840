@@ -16,6 +16,8 @@ type end struct {
 // Servers are named by ServerName() and clerks lazily make a
 // per-clerk ClientEnd to a server.  Each clerk has a Clnt with a map
 // of the allocated ends for this clerk.
+//
+// Clnt封装可以向已知的server通讯的方式
 type Clnt struct {
 	mu   sync.Mutex
 	net  *labrpc.Network
@@ -26,11 +28,14 @@ type Clnt struct {
 	srvs []string // 应该是表示能够进行通讯的server
 }
 
+// 根据net和可通讯的server创建client
 func makeClntTo(net *labrpc.Network, srvs []string) *Clnt {
 	return &Clnt{ends: make(map[string]end), net: net, srvs: srvs}
 }
 
 // caller must acquire lock
+//
+// server是否可通过clnt进行通讯
 func (clnt *Clnt) allowedL(server string) bool {
 	if clnt.srvs == nil {
 		return true
@@ -65,6 +70,7 @@ func (clnt *Clnt) makeEnd(server string) end {
 	return end
 }
 
+// 建立一个临时通讯的end来调用方法
 func (clnt *Clnt) Call(server, method string, args interface{}, reply interface{}) bool {
 	end := clnt.makeEnd(server)
 	ok := end.end.Call(method, args, reply)
@@ -128,10 +134,11 @@ func (clnt *Clnt) remove() {
 	}
 }
 
+// client集群
 type Clnts struct {
 	mu     sync.Mutex
 	net    *labrpc.Network
-	clerks map[*Clnt]struct{}
+	clerks map[*Clnt]struct{} // Clnt集群
 }
 
 func makeClnts(net *labrpc.Network) *Clnts {
@@ -153,6 +160,7 @@ func (clnts *Clnts) MakeClient() *Clnt {
 	return clnts.MakeClientTo(nil)
 }
 
+// 将srvs封装到一个clnt并注册到clnt群中
 func (clnts *Clnts) MakeClientTo(srvs []string) *Clnt {
 	clnts.mu.Lock()
 	defer clnts.mu.Unlock()

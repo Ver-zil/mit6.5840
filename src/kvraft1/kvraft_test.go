@@ -38,9 +38,11 @@ func (ts *Test) GenericTest() {
 	defer ts.Cleanup()
 
 	ch_partitioner := make(chan bool)
+	// 同步用的
 	ch_spawn := make(chan struct{})
 	ck := ts.MakeClerk()
 	res := kvtest.ClntRes{}
+	// put的key指令集
 	default_key := []string{"k"} // if not running with randomkeys
 	if ts.randomkeys {
 		default_key = kvtest.MakeKeys(NKEYS)

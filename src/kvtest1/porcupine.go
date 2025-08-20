@@ -47,6 +47,7 @@ func (log *OpLog) Read() []porcupine.Operation {
 // the monotonic clock
 var t0 = time.Unix(0, 0)
 
+// 直接调用定义在client里的ck get方法，并且返回对应结果
 func Get(cfg *tester.Config, ck IKVClerk, key string, log *OpLog, cli int) (string, rpc.Tversion, rpc.Err) {
 	start := int64(time.Since(t0))
 	val, ver, err := ck.Get(key)
@@ -64,6 +65,7 @@ func Get(cfg *tester.Config, ck IKVClerk, key string, log *OpLog, cli int) (stri
 	return val, ver, err
 }
 
+// 直接调用定义在client里的ck put方法，并且返回对应结果
 func Put(cfg *tester.Config, ck IKVClerk, key string, value string, version rpc.Tversion, log *OpLog, cli int) rpc.Err {
 	start := int64(time.Since(t0))
 	err := ck.Put(key, value, version)
