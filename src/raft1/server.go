@@ -59,6 +59,8 @@ func newRfsrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.Per
 	} else {
 		go s.applier(applyCh)
 	}
+	
+	DPrintf("Debug new server:%v is created", s.me)
 	return s
 }
 
@@ -74,6 +76,8 @@ func (rs *rfsrv) Kill() {
 		snapshot := rs.persister.ReadSnapshot()
 		rs.persister.Save(raftlog, snapshot)
 	}
+
+	DPrintf("Debug old server:%v is killed", rs.me)
 }
 
 func (rs *rfsrv) GetState() (int, bool) {

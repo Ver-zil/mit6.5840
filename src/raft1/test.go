@@ -150,6 +150,8 @@ func (ts *Test) checkLogs(i int, m raftapi.ApplyMsg) (string, bool) {
 	}
 	_, prevok := me.logs[m.CommandIndex-1]
 	me.logs[m.CommandIndex] = v
+	// note: this is where old server can access new server logs
+	DPrintf("Debug for log out of order server:%v map:%v", i, me.logs)
 	if m.CommandIndex > ts.maxIndex {
 		ts.maxIndex = m.CommandIndex
 	}

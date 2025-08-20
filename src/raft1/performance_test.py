@@ -110,15 +110,16 @@ def print_results(results: Dict[str, Dict[str, StatsMeter]], official_comparsion
 # 测试lab的核心部分
 def run_test(test: str, race: bool, timing: bool, debug: bool):
     test_cmd = ["go", "test", f"-run={test}"]
+    env = {}
     if race:
         test_cmd.append("-race")
     if timing:
         test_cmd = ["time"] + test_cmd
     if debug:
-        test_cmd = ["DEBUG=1"] + test_cmd
+        env = {"DEBUG": "1"}
     f, path = tempfile.mkstemp()
     start = time.time()
-    proc = subprocess.run(test_cmd, stdout=f, stderr=f)
+    proc = subprocess.run(test_cmd, stdout=f, stderr=f, env={**os.environ, **env})
     runtime = time.time() - start
     os.close(f)
     return test, path, proc.returncode, runtime
