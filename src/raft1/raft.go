@@ -112,6 +112,7 @@ type Raft struct {
 	heartBeatTimer  *time.Timer           // leader定时给其他节点发送心跳用的
 	applyChan       chan raftapi.ApplyMsg // 给外部将已commit日志进行apply的
 	applyChanFilter chan raftapi.ApplyMsg // 所有的applyMsg先走这个channel进行一次过滤
+	killChan        chan interface{}      // kill filter
 	replicatorCond  []*sync.Cond          // 用来唤醒同步日志的底层机制
 	applyChanCond   *sync.Cond            // 用于进行commit和apply的逻辑
 }
@@ -571,14 +572,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	// 真实环境下，kill以后就不会再运行了
 	// note:test模拟的时候，并非真的kill，能发送信号只是不能接收，加锁可防止一些诡异的问题
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	rf.stateTransform(end)
 	atomic.StoreInt32(&rf.dead, 1)
 
-	go func() {
-		rf.applyChanFilter <- raftapi.ApplyMsg{}
-	}()
+	rf.applyChanFilter <- raftapi.ApplyMsg{}
+	<-rf.killChan
 	// Your code here, if desired.
 }
 
@@ -847,6 +845,7 @@ func (rf *Raft) applyMsgFilter() {
 			rf.applyChan <- msg
 		} else if rf.killed() {
 			// note: 这个方式比直接关闭chan要安全
+			rf.killChan <- struct{}{}
 			return
 		}
 	}
@@ -1037,6 +1036,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		heartBeatTimer:  time.NewTimer(GetStableHeartBeatTimeout()),
 		applyChan:       applyCh,
 		applyChanFilter: make(chan raftapi.ApplyMsg, 100),
+		killChan:        make(chan interface{}),
 		replicatorCond:  make([]*sync.Cond, len(peers)),
 		applyChanCond:   sync.NewCond(&sync.Mutex{}),
 	}
