@@ -98,6 +98,7 @@ func (rsm *RSM) apllyMsgReader() {
 			// 防止其他follower调用chan
 			// 需要让submit的节点能收到反馈，也需要让重启的节点正常运行
 			curTerm, _ := rsm.rf.GetState()
+			// note:这里没放isLeader是因为state并不作为状态存储，所以重启后就是false
 			if op.Me == rsm.me && op.LeaderTerm == curTerm {
 				op.ReplyChan <- req
 				DPrintf("DoOp and call Submit")

@@ -44,6 +44,7 @@ func (ts *Test) StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me i
 
 }
 
+// test的mck接口
 func (ts *Test) MakeClerk() kvtest.IKVClerk {
 	clnt := ts.Config.MakeClient()
 	ck := MakeClerk(clnt, ts.Group(Gid).SrvNames())

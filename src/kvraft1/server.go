@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"sync"
 	"sync/atomic"
 
 	"6.5840/kvraft1/rsm"
@@ -8,7 +9,6 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/tester1"
-
 )
 
 type KVServer struct {
@@ -17,6 +17,13 @@ type KVServer struct {
 	rsm  *rsm.RSM
 
 	// Your definitions here.
+	mu    sync.Mutex
+	kvMap map[string]*kvValue
+}
+
+type kvValue struct {
+	value   string
+	version rpc.Tversion
 }
 
 // To type-cast req to the right type, take a look at Go's type switches or type
@@ -26,7 +33,52 @@ type KVServer struct {
 // https://go.dev/tour/methods/15
 func (kv *KVServer) DoOp(req any) any {
 	// Your code here
+	// 反射出args的类型，然后决定进行什么操作，方式参考rsm server
+	switch req.(type) {
+	case *rpc.GetArgs:
+		return kv.getOpHandler(req.(*rpc.GetArgs))
+	case *rpc.PutArgs:
+		return kv.putOpHandler(req.(*rpc.PutArgs))
+	default:
+		// wrong type! expecting an Inc.
+		rsm.DPrintf("Fatal Err req is not the type of put or get")
+	}
 	return nil
+}
+
+func (kv *KVServer) getOpHandler(req *rpc.GetArgs) any {
+	reply := &rpc.GetReply{}
+	if val, ok := kv.kvMap[req.Key]; ok {
+		copyVal := *val
+		reply.Value, reply.Version, reply.Err = copyVal.value, copyVal.version, rpc.OK
+	} else {
+		reply.Err = rpc.ErrNoKey
+	}
+	return reply
+}
+
+func (kv *KVServer) putOpHandler(req *rpc.PutArgs) any {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	rep := &rpc.PutReply{}
+
+	if val, ok := kv.kvMap[req.Key]; ok && val.version == req.Version {
+		val.value = req.Value
+		val.version = val.version + 1
+		rep.Err = rpc.OK
+	} else if !ok && req.Version == 0 {
+		val = &kvValue{value: req.Value, version: 1}
+		kv.kvMap[req.Key] = val
+		rep.Err = rpc.OK
+	} else if ok && val.version != req.Version {
+		rep.Err = rpc.ErrVersion
+	} else if !ok && req.Version != 0 {
+		rep.Err = rpc.ErrNoKey
+		rsm.DPrintf("what this scenario mean")
+	}
+
+	return rep
 }
 
 func (kv *KVServer) Snapshot() []byte {
@@ -42,12 +94,26 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// Your code here. Use kv.rsm.Submit() to submit args
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a GetReply: rep.(rpc.GetReply)
+	err, res := kv.rsm.Submit(args)
+	if err == rpc.ErrWrongLeader {
+		reply.Err = err
+		return
+	}
+	rep := res.(*rpc.GetReply)
+	reply.Value, reply.Version, reply.Err = rep.Value, rep.Version, rep.Err
 }
 
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// Your code here. Use kv.rsm.Submit() to submit args
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a PutReply: rep.(rpc.PutReply)
+	err, res := kv.rsm.Submit(args)
+	if err == rpc.ErrWrongLeader {
+		reply.Err = err
+		return
+	}
+	rep := res.(*rpc.PutReply)
+	reply.Err = rep.Err
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -79,8 +145,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 
 	kv := &KVServer{me: me}
 
-
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.
+	kv.kvMap = map[string]*kvValue{}
 	return []tester.IService{kv, kv.rsm.Raft()}
 }
