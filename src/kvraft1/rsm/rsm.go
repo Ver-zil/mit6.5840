@@ -48,7 +48,9 @@ type RSM struct {
 	sm           StateMachine
 
 	// Your definitions here.
-	opId int64 // 给msg分配的id
+	opId         int64      // 给msg分配的id
+	msgLastIdx   int        // 记录msg执行的位置，方便进行snapshot
+	snapshotCond *sync.Cond // snapshoter同步器
 }
 
 // servers[] contains the ports of the set of
@@ -73,26 +75,64 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
 	}
+	rsm.snapshotCond = sync.NewCond(&rsm.mu)
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+	// restart的时候恢复状态机
+	rsm.readPersist(persister.ReadSnapshot())
 	// 开启reader go routine
 	go rsm.applyMsgReader()
+	go rsm.snapshoter()
 	return rsm
+}
+
+func (rsm *RSM) readPersist(data []byte) {
+	DPrintf("RSM readPersist lenData:%v", len(data))
+	if len(data) < 1 { // bootstrap without any state?
+		return
+	}
+
+	rsm.sm.Restore(data)
+}
+
+func (rsm *RSM) snapshoter() {
+	for {
+		rsm.mu.Lock()
+		for !rsm.isLogSizeLarger() {
+			rsm.snapshotCond.Wait()
+		}
+		DPrintf("RSM Snapshoter start trim server:%v", rsm.me)
+
+		// 进行snapshot，理论上做完snapshot就可以把锁放了
+		smSnapshot := rsm.sm.Snapshot()
+		// todo 最好在raft层面加一个 >commitIdx的判断，虽然不太可能发生这种问题就是了
+		rsm.rf.Snapshot(rsm.msgLastIdx, smSnapshot)
+		rsm.mu.Unlock()
+	}
 }
 
 // 持续读取apply，设计参考
 func (rsm *RSM) applyMsgReader() {
 	for msg := range rsm.applyCh {
 		if msg.SnapshotValid {
-			DPrintf("RSM applier Snapshot deal it after")
+			rsm.mu.Lock()
+			// raft已经判断了当前snapshot是可接收的
+			rsm.sm.Restore(msg.Snapshot)
+			rsm.msgLastIdx = msg.SnapshotIndex
+			rsm.mu.Unlock()
 		} else if msg.CommandValid {
 			op, ok := msg.Command.(Op)
 			if !ok {
 				DPrintf("RSM Fatal Command is not op, may it's a bug cmd:%v type:%v", msg.Command, reflect.TypeOf(msg.Command))
 			}
-			DPrintf("RSM applier me:%v reqtype:%v req:%v", rsm.me, reflect.TypeOf(op.Req), op.Req)
+			DPrintf("RSM applier mez:%v reqtype:%v req:%v", rsm.me, reflect.TypeOf(op.Req), op.Req)
+			// 上锁，为了防止snapshot的时候对上层map进行操作
+			rsm.mu.Lock()
 			rep := rsm.sm.DoOp(op.Req)
+			rsm.msgLastIdx = msg.CommandIndex
+			rsm.mu.Unlock()
+			rsm.checkLogSize()
 			DPrintf("RSM applier me:%v cmd:%v reptype:%v rep:%v", rsm.me, msg.Command, reflect.TypeOf(rep), rep)
 
 			// 防止其他follower调用chan
@@ -156,4 +196,16 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	}
 	DPrintf("RSM Submit ErrWrong")
 	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+}
+
+func (rsm *RSM) checkLogSize() {
+	if rsm.isLogSizeLarger() {
+		DPrintf("RSM CheckLogSize start trim server:%v", rsm.me)
+		rsm.snapshotCond.Signal()
+	}
+}
+
+func (rsm *RSM) isLogSizeLarger() bool {
+	DPrintf("RSM isLogSizeLarger server:%v maxraftstate:%v, rsm.rf.persist:%v", rsm.me, rsm.maxraftstate, rsm.rf.PersistBytes())
+	return rsm.maxraftstate > 0 && rsm.rf.PersistBytes() > rsm.maxraftstate
 }
