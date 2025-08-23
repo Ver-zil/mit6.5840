@@ -3,6 +3,8 @@ package kvraft
 import (
 	// "log"
 
+	"time"
+
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/tester1"
@@ -41,9 +43,12 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	leaderIdx := ck.lastLeaderIdx
 
 	for {
-		if ok := ck.clnt.Call(ck.servers[leaderIdx], "KVServer.Get", &args, &reply); ok && reply.Err != rpc.ErrWrongLeader {
+		ok := ck.clnt.Call(ck.servers[leaderIdx], "KVServer.Get", &args, &reply)
+		if ok && reply.Err != rpc.ErrWrongLeader {
 			break
 		}
+
+		time.Sleep(100 * time.Millisecond)
 
 		leaderIdx = (leaderIdx + 1) % len(ck.servers)
 	}
@@ -79,9 +84,12 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 
 	// 只有err==ok || err==errMaybe才能进行返回
 	for {
-		if ok := ck.clnt.Call(ck.servers[leaderIdx], "KVServer.Put", &args, &reply); ok && reply.Err != rpc.ErrWrongLeader {
+		ok := ck.clnt.Call(ck.servers[leaderIdx], "KVServer.Put", &args, &reply)
+		if ok && reply.Err != rpc.ErrWrongLeader {
 			break
 		}
+
+		time.Sleep(100 * time.Millisecond)
 
 		// note: 这里的难点在于如何定义非第一次
 		// note: 为了兼容reliable网络，isFirst&&Err==ErrWrongLeader的情况可以不判定非第一次

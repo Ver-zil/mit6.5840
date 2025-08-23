@@ -27,6 +27,7 @@ type NullRep struct {
 type Dec struct {
 }
 
+// rsm test的上层server
 type rsmSrv struct {
 	ts      *Test
 	me      int
@@ -37,6 +38,7 @@ type rsmSrv struct {
 
 func makeRsmSrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.Persister, snapshot bool) *rsmSrv {
 	//log.Printf("mksrv %d", srv)
+	// 只有注册进去的才能进行序列化和反序列化(大写)
 	labgob.Register(Op{})
 	labgob.Register(Inc{})
 	labgob.Register(IncRep{})
@@ -75,6 +77,7 @@ func (rs *rsmSrv) Snapshot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rs.counter)
+	DPrintf("RSM Server.go snapshot rs.counter:%v", rs.counter)
 	return w.Bytes()
 }
 
@@ -84,6 +87,7 @@ func (rs *rsmSrv) Restore(data []byte) {
 	if d.Decode(&rs.counter) != nil {
 		log.Fatalf("%v couldn't decode counter", rs.me)
 	}
+	DPrintf("RSM Server.go restore rs.counter:%v", rs.counter)
 	//log.Printf("%d: restore %d", rs.me, rs.counter)
 }
 

@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -18,13 +19,19 @@ type KVServer struct {
 	rsm  *rsm.RSM
 
 	// Your definitions here.
-	mu    sync.Mutex
-	kvMap map[string]*kvValue
+	mu    sync.Mutex // 其实不太需要这个锁，因为server层面的操作可在rsm层面去做控制
+	kvMap map[string]KvValue
 }
 
-type kvValue struct {
+type KvValue struct {
 	value   string
 	version rpc.Tversion
+}
+
+// kvmap的编码包装
+type KVWrapper struct {
+	Keys   []string
+	Values []KvValue
 }
 
 // To type-cast req to the right type, take a look at Go's type switches or type
@@ -51,7 +58,7 @@ func (kv *KVServer) DoOp(req any) any {
 func (kv *KVServer) getOpHandler(req rpc.GetArgs) any {
 	reply := rpc.GetReply{}
 	if val, ok := kv.kvMap[req.Key]; ok {
-		copyVal := *val
+		copyVal := val
 		reply.Value, reply.Version, reply.Err = copyVal.value, copyVal.version, rpc.OK
 	} else {
 		reply.Err = rpc.ErrNoKey
@@ -66,11 +73,12 @@ func (kv *KVServer) putOpHandler(req rpc.PutArgs) any {
 	rep := rpc.PutReply{}
 
 	if val, ok := kv.kvMap[req.Key]; ok && val.version == req.Version {
-		val.value = req.Value
-		val.version = val.version + 1
+		newVal := KvValue{value: req.Value, version: val.version + 1}
+		kv.kvMap[req.Key] = newVal
 		rep.Err = rpc.OK
 	} else if !ok && req.Version == 0 {
-		val = &kvValue{value: req.Value, version: 1}
+		// 每次进行赋值操作，直接用一个全新的
+		val = KvValue{value: req.Value, version: 1}
 		kv.kvMap[req.Key] = val
 		rep.Err = rpc.OK
 	} else if ok && val.version != req.Version {
@@ -85,11 +93,38 @@ func (kv *KVServer) putOpHandler(req rpc.PutArgs) any {
 
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
-	return nil
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	wrapper := KVWrapper{
+		Keys:   make([]string, 0, len(kv.kvMap)),
+		Values: make([]KvValue, 0, len(kv.kvMap)),
+	}
+	for k, v := range kv.kvMap {
+		wrapper.Keys = append(wrapper.Keys, k)
+		wrapper.Values = append(wrapper.Values, v)
+	}
+	e.Encode(wrapper)
+	rsm.DPrintf("Server snapshot try restore:%v", len(w.Bytes()))
+	// kv.Restore(w.Bytes())
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
 	// Your code here
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var wrapper KVWrapper
+	if d.Decode(&wrapper) != nil {
+		rsm.DPrintf("Server Restore Err server:%v", kv.me)
+	}
+
+	kvMap := make(map[string]KvValue, len(wrapper.Keys))
+	for i := 0; i < len(wrapper.Keys); i++ {
+		kvMap[wrapper.Keys[i]] = wrapper.Values[i]
+	}
+
+	kv.kvMap = kvMap
+	rsm.DPrintf("Server Restore kvMap:%v", kvMap)
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
@@ -152,6 +187,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.
-	kv.kvMap = map[string]*kvValue{}
+	kv.kvMap = map[string]KvValue{}
 	return []tester.IService{kv, kv.rsm.Raft()}
 }
