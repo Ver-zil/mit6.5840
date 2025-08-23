@@ -226,7 +226,8 @@ func (ts *Test) OnePut(me int, ck IKVClerk, key string, ver rpc.Tversion) (rpc.T
 		ver0 := ts.GetJson(ck, key, me, &e)
 		// 如果put成功了，那get
 		if err == rpc.OK && ver0 == ver+1 { // my put?
-			// 这个判断看起来好像有点问题哦，应该是or而不是and
+			// todo: 这个判断看起来好像有点问题哦，应该是or而不是and
+			// e.V就是这段代码自己传进去的ver，value本身的一部分，ver0则是我返回的版本号
 			if e.Id != me && e.V != ver {
 				ts.Fatalf("Wrong value %v", e)
 			}

@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"reflect"
 	"sync"
 	"sync/atomic"
 
@@ -34,20 +35,21 @@ type kvValue struct {
 func (kv *KVServer) DoOp(req any) any {
 	// Your code here
 	// 反射出args的类型，然后决定进行什么操作，方式参考rsm server
+	rsm.DPrintf("Server doOp server:%v reqtyep:%v req:%v", kv.me, reflect.TypeOf(req), req)
 	switch req.(type) {
-	case *rpc.GetArgs:
-		return kv.getOpHandler(req.(*rpc.GetArgs))
-	case *rpc.PutArgs:
-		return kv.putOpHandler(req.(*rpc.PutArgs))
+	case rpc.GetArgs:
+		return kv.getOpHandler(req.(rpc.GetArgs))
+	case rpc.PutArgs:
+		return kv.putOpHandler(req.(rpc.PutArgs))
 	default:
 		// wrong type! expecting an Inc.
-		rsm.DPrintf("Fatal Err req is not the type of put or get")
+		rsm.DPrintf("Sever doOp Fatal Err req is not the type of put or get")
 	}
 	return nil
 }
 
-func (kv *KVServer) getOpHandler(req *rpc.GetArgs) any {
-	reply := &rpc.GetReply{}
+func (kv *KVServer) getOpHandler(req rpc.GetArgs) any {
+	reply := rpc.GetReply{}
 	if val, ok := kv.kvMap[req.Key]; ok {
 		copyVal := *val
 		reply.Value, reply.Version, reply.Err = copyVal.value, copyVal.version, rpc.OK
@@ -57,11 +59,11 @@ func (kv *KVServer) getOpHandler(req *rpc.GetArgs) any {
 	return reply
 }
 
-func (kv *KVServer) putOpHandler(req *rpc.PutArgs) any {
+func (kv *KVServer) putOpHandler(req rpc.PutArgs) any {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	rep := &rpc.PutReply{}
+	rep := rpc.PutReply{}
 
 	if val, ok := kv.kvMap[req.Key]; ok && val.version == req.Version {
 		val.value = req.Value
@@ -75,7 +77,7 @@ func (kv *KVServer) putOpHandler(req *rpc.PutArgs) any {
 		rep.Err = rpc.ErrVersion
 	} else if !ok && req.Version != 0 {
 		rep.Err = rpc.ErrNoKey
-		rsm.DPrintf("what this scenario mean")
+		rsm.DPrintf("Server putOpHandler what this scenario mean")
 	}
 
 	return rep
@@ -94,12 +96,13 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// Your code here. Use kv.rsm.Submit() to submit args
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a GetReply: rep.(rpc.GetReply)
-	err, res := kv.rsm.Submit(args)
+	err, res := kv.rsm.Submit(*args)
 	if err == rpc.ErrWrongLeader {
 		reply.Err = err
 		return
 	}
-	rep := res.(*rpc.GetReply)
+	rsm.DPrintf("Server Get submit after server:%v", kv.me)
+	rep := res.(rpc.GetReply)
 	reply.Value, reply.Version, reply.Err = rep.Value, rep.Version, rep.Err
 }
 
@@ -107,12 +110,13 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// Your code here. Use kv.rsm.Submit() to submit args
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a PutReply: rep.(rpc.PutReply)
-	err, res := kv.rsm.Submit(args)
+	err, res := kv.rsm.Submit(*args)
 	if err == rpc.ErrWrongLeader {
 		reply.Err = err
 		return
 	}
-	rep := res.(*rpc.PutReply)
+	rsm.DPrintf("Server Put submit after server:%v", kv.me)
+	rep := res.(rpc.PutReply)
 	reply.Err = rep.Err
 }
 
@@ -127,6 +131,7 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	// Your code here, if desired.
+	rsm.DPrintf("")
 }
 
 func (kv *KVServer) killed() bool {

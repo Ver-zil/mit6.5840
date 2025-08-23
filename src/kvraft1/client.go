@@ -1,6 +1,8 @@
 package kvraft
 
 import (
+	// "log"
+
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/tester1"
@@ -39,17 +41,13 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	leaderIdx := ck.lastLeaderIdx
 
 	for {
-		for !ck.clnt.Call(ck.servers[leaderIdx], "KVServer.Get", &args, &reply) {
-		}
-
-		if reply.Err != rpc.ErrWrongLeader {
+		if ok := ck.clnt.Call(ck.servers[leaderIdx], "KVServer.Get", &args, &reply); ok && reply.Err != rpc.ErrWrongLeader {
 			break
 		}
 
-		// 如果走错server则需要记录leaderIdx并且进行下一轮
 		leaderIdx = (leaderIdx + 1) % len(ck.servers)
-		ck.lastLeaderIdx = leaderIdx
 	}
+	ck.lastLeaderIdx = leaderIdx
 
 	return reply.Value, reply.Version, reply.Err
 }
@@ -81,20 +79,23 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 
 	// 只有err==ok || err==errMaybe才能进行返回
 	for {
-		for !ck.clnt.Call(ck.servers[leaderIdx], "KVServer.Put", &args, &reply) {
-			isRirst = false
-			// time.Sleep(100 * time.Millisecond)
-		}
-
-		if reply.Err != rpc.ErrWrongLeader {
+		if ok := ck.clnt.Call(ck.servers[leaderIdx], "KVServer.Put", &args, &reply); ok && reply.Err != rpc.ErrWrongLeader {
 			break
 		}
 
-		// 如果走错server了，isRirst需要刷新，leaderIdx也需要记录一下
-		isRirst = true
+		// note: 这里的难点在于如何定义非第一次
+		// note: 为了兼容reliable网络，isFirst&&Err==ErrWrongLeader的情况可以不判定非第一次
+		// if !isRirst || reply.Err != rpc.ErrWrongLeader {
+		// 	isRirst = false
+		// }
+		isRirst = false
+
+		// if reply.Err == rpc.ErrWrongLeader {
+		// 	isRirst = true
+		// }
 		leaderIdx = (leaderIdx + 1) % len(ck.servers)
-		ck.lastLeaderIdx = leaderIdx
 	}
+	ck.lastLeaderIdx = leaderIdx
 
 	// 网络波动，多次操作中间可能成功一次但是没办法判定到底是不是真的自己操作的
 	if !isRirst && reply.Err == rpc.ErrVersion {

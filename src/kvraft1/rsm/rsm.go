@@ -77,31 +77,32 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
 	// 开启reader go routine
-	go rsm.apllyMsgReader()
+	go rsm.applyMsgReader()
 	return rsm
 }
 
 // 持续读取apply，设计参考
-func (rsm *RSM) apllyMsgReader() {
+func (rsm *RSM) applyMsgReader() {
 	for msg := range rsm.applyCh {
 		if msg.SnapshotValid {
-			DPrintf("Snapshot deal it after")
+			DPrintf("RSM applier Snapshot deal it after")
 		} else if msg.CommandValid {
 			op, ok := msg.Command.(Op)
 			if !ok {
-				DPrintf("Command is not op, may it's a bug cmd:%v type:%v", msg.Command, reflect.TypeOf(msg.Command))
+				DPrintf("RSM Fatal Command is not op, may it's a bug cmd:%v type:%v", msg.Command, reflect.TypeOf(msg.Command))
 			}
-
-			req := rsm.sm.DoOp(op.Req)
-			DPrintf("RSM DoOp me:%v cmd:%v", rsm.me, msg.Command)
+			DPrintf("RSM applier me:%v reqtype:%v req:%v", rsm.me, reflect.TypeOf(op.Req), op.Req)
+			rep := rsm.sm.DoOp(op.Req)
+			DPrintf("RSM applier me:%v cmd:%v reptype:%v rep:%v", rsm.me, msg.Command, reflect.TypeOf(rep), rep)
 
 			// 防止其他follower调用chan
 			// 需要让submit的节点能收到反馈，也需要让重启的节点正常运行
 			curTerm, _ := rsm.rf.GetState()
 			// note:这里没放isLeader是因为state并不作为状态存储，所以重启后就是false
 			if op.Me == rsm.me && op.LeaderTerm == curTerm {
-				op.ReplyChan <- req
-				DPrintf("DoOp and call Submit")
+				DPrintf("RSM applier DoOp and submit response pre server:%v", rsm.me)
+				op.ReplyChan <- rep
+				DPrintf("RSM applier DoOp and submit response after server:%v", rsm.me)
 			} else {
 
 			}
@@ -127,7 +128,7 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 
 	// your code here
 	// 将req封装成op
-
+	DPrintf("RSM Submit Call")
 	if startTerm, isLeader := rsm.rf.GetState(); isLeader {
 		op := Op{
 			Me:         rsm.me,
@@ -136,21 +137,23 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 			ReplyChan:  make(chan any),
 			LeaderTerm: startTerm,
 		}
+		DPrintf("RSM Submit------------start req:%v", req)
 		_, curTerm, isLeader := rsm.rf.Start(op)
-		DPrintf("Repeat------------- startTerm:%v curTerm:%v isLeader:%v", startTerm, curTerm, isLeader)
+		DPrintf("RSM submit------------- startTerm:%v curTerm:%v server:%v isLeader:%v", startTerm, curTerm, rsm.me, isLeader)
 		for isLeader && curTerm == startTerm {
-			DPrintf("leader Submit op:%v", op)
+			DPrintf("RSM leader Submit op:%v", op)
 
 			select {
 			case rep := <-op.ReplyChan:
 				return rpc.OK, rep
 			case <-time.After(time.Second):
-				DPrintf("Submit Overtime op:%v", op)
+				DPrintf("RSM Submit Overtime op:%v", op)
 			}
 
 			curTerm, isLeader = rsm.rf.GetState()
+			DPrintf("RSM submit overtime state")
 		}
 	}
-
+	DPrintf("RSM Submit ErrWrong")
 	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
 }
