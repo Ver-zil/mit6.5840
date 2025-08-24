@@ -43,8 +43,6 @@ type KVWrapper struct {
 func (kv *KVServer) DoOp(req any) any {
 	// Your code here
 	// 反射出args的类型，然后决定进行什么操作，方式参考rsm server
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	rsm.DPrintf("Server doOp server:%v reqtyep:%v req:%v kvmap:%v meaddress:%v", kv.me, reflect.TypeOf(req), req, kv.kvMap, &kv.me)
 	switch req.(type) {
 	case rpc.GetArgs:
@@ -195,10 +193,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	labgob.Register(rpc.GetArgs{})
 
 	kv := &KVServer{me: me}
-
+	kv.kvMap = map[string]KvValue{}
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.
-	kv.kvMap = map[string]KvValue{}
-	go kv.listener()
+	// go kv.listener()
 	return []tester.IService{kv, kv.rsm.Raft()}
 }
