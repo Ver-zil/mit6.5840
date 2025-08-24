@@ -93,7 +93,9 @@ func (rsm *RSM) readPersist(data []byte) {
 		return
 	}
 
+	rsm.mu.Lock()
 	rsm.sm.Restore(data)
+	rsm.mu.Unlock()
 }
 
 func (rsm *RSM) snapshoter() {

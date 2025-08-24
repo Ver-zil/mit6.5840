@@ -72,9 +72,9 @@ func (ts *Test) GenericTest() {
 		if i == NITER-1 {
 			tester.SetAnnotationFinalized()
 		}
-
+		rsm.DPrintf("-------------------------1")
 		ts.CheckPorcupine()
-
+		rsm.DPrintf("-------------------------2")
 		if ts.partitions {
 			ch_partitioner <- true
 			//log.Printf("wait for partitioner\n")
@@ -88,7 +88,7 @@ func (ts *Test) GenericTest() {
 			// wait for a while so that we have a new term
 			time.Sleep(kvtest.ElectionTimeout)
 		}
-
+		rsm.DPrintf("-------------------------3")
 		if ts.crash {
 			// log.Printf("shutdown servers\n")
 			for i := 0; i < ts.nservers; i++ {
@@ -106,7 +106,7 @@ func (ts *Test) GenericTest() {
 			ts.Group(Gid).ConnectAll()
 			tester.AnnotateClearFailure()
 		}
-
+		rsm.DPrintf("-------------------------4")
 		if ts.maxraftstate > 0 {
 			// Check maximum after the servers have processed all client
 			// requests and had time to checkpoint.
