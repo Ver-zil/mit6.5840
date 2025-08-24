@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
@@ -24,8 +25,8 @@ type KVServer struct {
 }
 
 type KvValue struct {
-	value   string
-	version rpc.Tversion
+	Value   string
+	Version rpc.Tversion
 }
 
 // kvmap的编码包装
@@ -42,7 +43,9 @@ type KVWrapper struct {
 func (kv *KVServer) DoOp(req any) any {
 	// Your code here
 	// 反射出args的类型，然后决定进行什么操作，方式参考rsm server
-	rsm.DPrintf("Server doOp server:%v reqtyep:%v req:%v", kv.me, reflect.TypeOf(req), req)
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	rsm.DPrintf("Server doOp server:%v reqtyep:%v req:%v kvmap:%v meaddress:%v", kv.me, reflect.TypeOf(req), req, kv.kvMap, &kv.me)
 	switch req.(type) {
 	case rpc.GetArgs:
 		return kv.getOpHandler(req.(rpc.GetArgs))
@@ -59,7 +62,8 @@ func (kv *KVServer) getOpHandler(req rpc.GetArgs) any {
 	reply := rpc.GetReply{}
 	if val, ok := kv.kvMap[req.Key]; ok {
 		copyVal := val
-		reply.Value, reply.Version, reply.Err = copyVal.value, copyVal.version, rpc.OK
+		reply.Value, reply.Version, reply.Err = copyVal.Value, copyVal.Version, rpc.OK
+		rsm.DPrintf("Server getOp server:%v kvmap:%v", kv.me, kv.kvMap)
 	} else {
 		reply.Err = rpc.ErrNoKey
 	}
@@ -67,21 +71,19 @@ func (kv *KVServer) getOpHandler(req rpc.GetArgs) any {
 }
 
 func (kv *KVServer) putOpHandler(req rpc.PutArgs) any {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
 	rep := rpc.PutReply{}
 
-	if val, ok := kv.kvMap[req.Key]; ok && val.version == req.Version {
-		newVal := KvValue{value: req.Value, version: val.version + 1}
+	if val, ok := kv.kvMap[req.Key]; ok && val.Version == req.Version {
+		newVal := KvValue{Value: req.Value, Version: val.Version + 1}
 		kv.kvMap[req.Key] = newVal
 		rep.Err = rpc.OK
+		rsm.DPrintf("Server putOp server:%v kvmap:%v", kv.me, kv.kvMap)
 	} else if !ok && req.Version == 0 {
 		// 每次进行赋值操作，直接用一个全新的
-		val = KvValue{value: req.Value, version: 1}
+		val = KvValue{Value: req.Value, Version: 1}
 		kv.kvMap[req.Key] = val
 		rep.Err = rpc.OK
-	} else if ok && val.version != req.Version {
+	} else if ok && val.Version != req.Version {
 		rep.Err = rpc.ErrVersion
 	} else if !ok && req.Version != 0 {
 		rep.Err = rpc.ErrNoKey
@@ -104,7 +106,7 @@ func (kv *KVServer) Snapshot() []byte {
 		wrapper.Values = append(wrapper.Values, v)
 	}
 	e.Encode(wrapper)
-	rsm.DPrintf("Server snapshot try restore:%v", len(w.Bytes()))
+	rsm.DPrintf("Server snapshot server:%v bytes:%v kvmap:%v", kv.me, len(w.Bytes()), kv.kvMap)
 	// kv.Restore(w.Bytes())
 	return w.Bytes()
 }
@@ -124,7 +126,7 @@ func (kv *KVServer) Restore(data []byte) {
 	}
 
 	kv.kvMap = kvMap
-	rsm.DPrintf("Server Restore kvMap:%v", kvMap)
+	rsm.DPrintf("Server Restore server:%v kvMap:%v meaddress:%v", kv.me, kv.kvMap, &kv.me)
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
@@ -174,6 +176,15 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
+func (kv *KVServer) listener() {
+	for !kv.killed() {
+		kv.mu.Lock()
+		rsm.DPrintf("Server listener server:%v kvmap:%v", kv.me, kv.kvMap)
+		time.Sleep(100 * time.Millisecond)
+		kv.mu.Unlock()
+	}
+}
+
 // StartKVServer() and MakeRSM() must return quickly, so they should
 // start goroutines for any long-running work.
 func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persister *tester.Persister, maxraftstate int) []tester.IService {
@@ -188,5 +199,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.
 	kv.kvMap = map[string]KvValue{}
+	go kv.listener()
 	return []tester.IService{kv, kv.rsm.Raft()}
 }
